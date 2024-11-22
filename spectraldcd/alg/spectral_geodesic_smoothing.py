@@ -291,9 +291,9 @@ def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
 
     
     
-    print("init time:", time.time() - init_start)
+    #print("init time:", time.time() - init_start)
     
-    print("Starting iterations")
+    #print("Starting iterations")
     iter_start = time.time()
     point_tangent_times = []
     theta_times = []
@@ -314,7 +314,7 @@ def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
         if itr == max_iter - 1:
             print("Warning: max iterations reached")
         
-        print(f"Iteration {itr}")
+        #print(f"Iteration {itr}")
         
         # P-Update, P = [H, Y]
         pt_time = time.time()
@@ -362,9 +362,9 @@ def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
         
         conv_check_times.append(time.time() - conv_check_time)
     
-    print("point tangent time", np.sum(np.array(point_tangent_times)))
-    print("theta time", np.sum(np.array(theta_times)))
-    print("conv check time", np.sum(np.array(conv_check_times)))
+    #print("point tangent time", np.sum(np.array(point_tangent_times)))
+    #print("theta time", np.sum(np.array(theta_times)))
+    #print("conv check time", np.sum(np.array(conv_check_times)))
     return H, Y, Theta
 
 
@@ -476,7 +476,6 @@ class SpectralGeodesicSmoother(ABC):
                     benefit = self.benefit_fn_broadcast([self.sadj_list[i]], [labels_i])[0]
                     benefit_vs_time_and_k[j, i] = benefit
 
-            print(f"Time to compute benefit matrix: {time.time() - start}")
 
             if self.smoothing_filter == 'median':
                 kernel_size = self.smoothing_parameter
@@ -499,17 +498,15 @@ class SpectralGeodesicSmoother(ABC):
         time_start = time.time()
         self.make_clustering_matrices()
         self.make_modeled_clustering_matrices() 
-        print(f"Time to make modeled clustering matrices: {time.time() - time_start}")
         time_start = time.time()
         self.get_geodesic_embeddings()
         print(f"Time to get geodesic embeddings: {time.time() - time_start}")
         time_start = time.time()
         assignments = self.clustering_Euclidean()
-        print(f"Time to cluster: {time.time() - time_start}")
         return assignments 
 
 def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_communities=False, mode='simple-nsc', fit_eigenvector_embeddings=False, smoothing_filter=None, smoothing_parameter=None, **mode_kwargs):
-    print("spectral_geodesic_smoothing")
+    #print("spectral_geodesic_smoothing")
     T = len(sadj_list)
     if not isinstance(kc, list) and kc != 'auto':
         try:

@@ -1,0 +1,19 @@
+# Figure size in inches (width, height)
+figure.figsize: 6.75, 4.5  
+
+# Font settings
+font.size: 10
+font.family: serif
+font.serif: Times, Times New Roman, Nimbus Roman No9 L, FreeSerif  # Fallback fonts
+
+# Axes titles and labels settings
+axes.titlesize: 10  # Size of the plot title
+axes.labelsize: 10  # Size of the x and y labels
+
+# Tick settings (optional, to fine-tune appearance)
+xtick.labelsize: 10
+ytick.labelsize: 10
+
+# latex thigns
+text.usetex: True
+text.latex.preamble: \usepackage{amsmath}\usepackage{amssymb}\usepackage{siunitx}[=v2]
