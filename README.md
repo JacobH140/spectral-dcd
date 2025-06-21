@@ -9,6 +9,6 @@ Code for "A Spectral Framework for Tracking Communities in Evolving Networks":
   title     = {A Spectral Framework for Tracking Communities in Evolving Networks},
   booktitle = {Proceedings of the Third Learning on Graphs Conference},
   year      = {2024},
-  organization = {PLMR},
+  organization = {PMLR},
 }
 ```
