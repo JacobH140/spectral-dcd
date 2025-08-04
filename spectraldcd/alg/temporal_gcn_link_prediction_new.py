@@ -60,6 +60,81 @@ class LaplacianEigenvectorEncoder:
             return degree_features
 
 
+class GeodesicTemporalEncoder:
+    """Encodes node features using geodesic smoothing across time."""
+    
+    def __init__(self, n_eigenvectors: int = 64, smoothing_filter: str = 'median', 
+                 smoothing_parameter: int = 5):
+        self.n_eigenvectors = n_eigenvectors
+        self.smoothing_filter = smoothing_filter
+        self.smoothing_parameter = smoothing_parameter
+        self.embeddings_sequence = None
+        
+    def fit_transform_sequence(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
+        """Compute geodesically smoothed embeddings for temporal sequence."""
+        try:
+            # Import the spectral geodesic smoothing function
+            from .spectral_geodesic_smoothing import spectral_geodesic_smoothing
+        except ImportError:
+            try:
+                from spectral_geodesic_smoothing import spectral_geodesic_smoothing
+            except ImportError:
+                print("Warning: Could not import spectral_geodesic_smoothing, falling back to individual Laplacian encodings")
+                return self._fallback_encoding(adjacency_sequence)
+        
+        try:
+            T = len(adjacency_sequence)
+            num_nodes = adjacency_sequence[0].shape[0]
+            
+            # Run spectral geodesic smoothing to get temporally smoothed embeddings
+            _, embeddings_sequence = spectral_geodesic_smoothing(
+                adjacency_sequence, 
+                T=T, 
+                num_nodes=num_nodes, 
+                ke=self.n_eigenvectors,
+                stable_communities=False,
+                mode='simple-nsc',
+                smoothing_filter=self.smoothing_filter,
+                smoothing_parameter=self.smoothing_parameter
+            )
+            
+            # Process embeddings to ensure consistent dimensionality
+            processed_embeddings = []
+            for t in range(T):
+                embedding = embeddings_sequence[t]
+                
+                # Ensure we have the right number of dimensions
+                if embedding.shape[1] < self.n_eigenvectors:
+                    padding = np.zeros((embedding.shape[0], self.n_eigenvectors - embedding.shape[1]))
+                    embedding = np.hstack([embedding, padding])
+                elif embedding.shape[1] > self.n_eigenvectors:
+                    embedding = embedding[:, :self.n_eigenvectors]
+                
+                processed_embeddings.append(embedding)
+            
+            self.embeddings_sequence = processed_embeddings
+            return processed_embeddings
+            
+        except Exception as e:
+            print(f"Warning: Geodesic smoothing failed ({e}), falling back to individual Laplacian encodings")
+            return self._fallback_encoding(adjacency_sequence)
+    
+    def _fallback_encoding(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
+        """Fallback to individual Laplacian encodings if geodesic smoothing fails."""
+        encoder = LaplacianEigenvectorEncoder(self.n_eigenvectors)
+        embeddings = []
+        for adj_matrix in adjacency_sequence:
+            embedding = encoder.fit_transform(adj_matrix)
+            embeddings.append(embedding)
+        return embeddings
+    
+    def get_embedding_at_time(self, t: int) -> np.ndarray:
+        """Get embedding for specific timestep."""
+        if self.embeddings_sequence is None:
+            raise ValueError("Must call fit_transform_sequence first")
+        return self.embeddings_sequence[t]
+
+
 class TemporalGCNCell(nn.Module):
     """Single temporal GCN cell with GRU-like update mechanism."""
     
@@ -214,25 +289,29 @@ class TemporalLinkPredictionExperiment:
     """Main experiment class for comparing temporal vs static approaches."""
     
     def __init__(self, 
-                 encoding_type: str = "laplacian",  # "laplacian", "identity", or "none"
+                 encoding_type: str = "laplacian",  # "laplacian", "identity", "none", or "geodesic"
                  n_eigenvectors: int = 32,
                  hidden_dim: int = 64,
                  num_layers: int = 2,
                  dropout: float = 0.5,
                  learning_rate: float = 0.01,
                  epochs: int = 200,
+                 smoothing_filter: str = 'median',
+                 smoothing_parameter: int = 5,
                  device: str = 'auto'):
         """
         Initialize experiment.
         
         Args:
-            encoding_type: Type of node encoding ("laplacian", "identity", or "none")
+            encoding_type: Type of node encoding ("laplacian", "identity", "none", or "geodesic")
             n_eigenvectors: Number of eigenvectors for encoding
             hidden_dim: Hidden dimension for temporal GCN
             num_layers: Number of temporal layers
             dropout: Dropout rate
             learning_rate: Learning rate
             epochs: Training epochs
+            smoothing_filter: Filter type for geodesic smoothing ('median', 'gaussian')
+            smoothing_parameter: Parameter for smoothing filter
             device: Computing device
         """
         self.encoding_type = encoding_type
@@ -242,6 +321,8 @@ class TemporalLinkPredictionExperiment:
         self.dropout = dropout
         self.learning_rate = learning_rate
         self.epochs = epochs
+        self.smoothing_filter = smoothing_filter
+        self.smoothing_parameter = smoothing_parameter
         
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -249,21 +330,37 @@ class TemporalLinkPredictionExperiment:
             self.device = torch.device(device)
         
         self.encoder = None
+        self.geodesic_encoder = None
         if encoding_type == "laplacian":
             self.encoder = LaplacianEigenvectorEncoder(n_eigenvectors)
+        elif encoding_type == "geodesic":
+            self.geodesic_encoder = GeodesicTemporalEncoder(
+                n_eigenvectors, smoothing_filter, smoothing_parameter
+            )
     
     def _prepare_features(self, adjacency_matrix: sp.csr_matrix) -> np.ndarray:
-        """Prepare node features based on encoding method."""
+        """Prepare node features based on encoding method (for single timestep)."""
         if self.encoding_type == "laplacian":
             return self.encoder.fit_transform(adjacency_matrix)
         elif self.encoding_type == "identity":
             # Use identity features (one-hot encoding of node IDs)
             n_nodes = adjacency_matrix.shape[0]
             return np.eye(n_nodes)
+        elif self.encoding_type == "geodesic":
+            # For geodesic encoding, we need the full sequence - this should not be called directly
+            # Instead, use _prepare_geodesic_features_sequence
+            raise ValueError("For geodesic encoding, use _prepare_geodesic_features_sequence instead")
         else:  # encoding_type == "none"
             # Use minimal constant features (just a single dimension)
             n_nodes = adjacency_matrix.shape[0]
             return np.ones((n_nodes, 1))
+    
+    def _prepare_geodesic_features_sequence(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
+        """Prepare geodesic features for entire temporal sequence."""
+        if self.encoding_type != "geodesic":
+            raise ValueError("This method should only be called for geodesic encoding")
+        
+        return self.geodesic_encoder.fit_transform_sequence(adjacency_sequence)
     
     def _split_temporal_snapshots(self, adjacency_sequence: List[sp.csr_matrix]) -> Tuple[List[sp.csr_matrix], List[sp.csr_matrix], List[sp.csr_matrix]]:
         """Split temporal snapshots into train/val/test sets (70%/15%/15%)."""
@@ -290,17 +387,34 @@ class TemporalLinkPredictionExperiment:
         """Convert sequence of adjacency matrices to temporal PyTorch data."""
         data_sequence = []
         
-        for adj_matrix in adjacency_sequence:
-            features = self._prepare_features(adj_matrix)
-            edge_index = torch.tensor(np.array(adj_matrix.nonzero()), dtype=torch.long)
+        # Handle geodesic encoding differently since it needs the full sequence
+        if self.encoding_type == "geodesic":
+            features_sequence = self._prepare_geodesic_features_sequence(adjacency_sequence)
             
-            data = Data(
-                x=torch.tensor(features, dtype=torch.float),
-                edge_index=edge_index,
-                num_nodes=adj_matrix.shape[0]
-            )
-            
-            data_sequence.append(data)
+            for i, adj_matrix in enumerate(adjacency_sequence):
+                features = features_sequence[i]
+                edge_index = torch.tensor(np.array(adj_matrix.nonzero()), dtype=torch.long)
+                
+                data = Data(
+                    x=torch.tensor(features, dtype=torch.float),
+                    edge_index=edge_index,
+                    num_nodes=adj_matrix.shape[0]
+                )
+                
+                data_sequence.append(data)
+        else:
+            # For other encoding types, process individually
+            for adj_matrix in adjacency_sequence:
+                features = self._prepare_features(adj_matrix)
+                edge_index = torch.tensor(np.array(adj_matrix.nonzero()), dtype=torch.long)
+                
+                data = Data(
+                    x=torch.tensor(features, dtype=torch.float),
+                    edge_index=edge_index,
+                    num_nodes=adj_matrix.shape[0]
+                )
+                
+                data_sequence.append(data)
         
         return data_sequence
     
@@ -740,7 +854,7 @@ def run_full_comparison_experiment():
     
     print("Generating dynamic SBM data...")
     # Generate dynamic SBM data
-    adjacency_all, labels_all = sbm_dynamic_model_2(
+    adjacency_all, _ = sbm_dynamic_model_2(
         N=100, k=2, pin=[0.3, 0.3], pout=0.05, 
         p_switch=0.01, T=50, Totalsims=1, base_seed=42, try_sparse=True
     )
@@ -750,13 +864,16 @@ def run_full_comparison_experiment():
     
     print(f"Generated {len(adjacency_sequence)} timesteps with {adjacency_sequence[0].shape[0]} nodes")
     
-    # Run experiments with all three encoding methods
+    # Run experiments with all four encoding methods (including geodesic)
     results = {}
     
-    for encoding_type in ["laplacian", "identity", "none"]:
+    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
         print(f"\n{'='*50}")
         print(f"Running experiment with {encoding_type.upper()} encoding")
         print(f"{'='*50}")
+        
+        # Adjust parameters for geodesic encoding
+        smoothing_param = 11 if encoding_type == "geodesic" else 5
         
         experiment = TemporalLinkPredictionExperiment(
             encoding_type=encoding_type,
@@ -765,7 +882,9 @@ def run_full_comparison_experiment():
             num_layers=2,
             dropout=0.3,
             learning_rate=0.001,
-            epochs=500  # Reduced for faster testing
+            epochs=500,  # Reduced for faster testing
+            smoothing_filter='median',
+            smoothing_parameter=smoothing_param
         )
         
         experiment_results = experiment.run_comprehensive_experiment(
@@ -785,14 +904,14 @@ def run_full_comparison_experiment():
     
     # Collect all results
     all_results = {}
-    for encoding_type in ["laplacian", "identity", "none"]:
+    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
         all_results[encoding_type] = {}
         for method in ['temporal', 'static']:
             df = pd.DataFrame(results[encoding_type][method]['results'])
             all_results[encoding_type][method] = df[['auc', 'ap', 'accuracy']].mean()
     
     # Show comparison for each encoding type
-    for encoding_type in ["laplacian", "identity", "none"]:
+    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
         print(f"\n{encoding_type.upper()} ENCODING COMPARISON:")
         print(f"{'-'*40}")
         temporal_results = all_results[encoding_type]['temporal']
@@ -808,7 +927,7 @@ def run_full_comparison_experiment():
     print(f"{'='*70}")
     print(f"{'Encoding':<12} {'Method':<8} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
     print(f"{'-'*50}")
-    for encoding_type in ["laplacian", "identity", "none"]:
+    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
         for method in ['temporal', 'static']:
             results_data = all_results[encoding_type][method]
             print(f"{encoding_type.title():<12} {method.title():<8} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
@@ -820,7 +939,7 @@ def run_full_comparison_experiment():
     none_temporal = all_results["none"]["temporal"]
     none_static = all_results["none"]["static"]
     
-    for encoding_type in ["laplacian", "identity"]:
+    for encoding_type in ["laplacian", "identity", "geodesic"]:
         temporal_benefit = all_results[encoding_type]["temporal"]
         static_benefit = all_results[encoding_type]["static"]
         print(f"{encoding_type.title()} Temporal: AUC={temporal_benefit['auc']-none_temporal['auc']:+.4f}, AP={temporal_benefit['ap']-none_temporal['ap']:+.4f}, Acc={temporal_benefit['accuracy']-none_temporal['accuracy']:+.4f}")
