@@ -864,8 +864,8 @@ def run_full_comparison_experiment():
     base_seed = 4
     
     adjacency_all, _ = sbm_dynamic_model_2(
-        d=d, k=k, pin=pin, pout=pout, p_switch=p_switch,
-        n_sims=n_sims, base_seed=base_seed, try_sparse=True,)
+        N=d, k=k, pin=pin, pout=pout, p_switch=p_switch,
+        Totalsims=n_sims, base_seed=base_seed, try_sparse=True,)
     
     print(f"Generated {len(adjacency_all[0])} snapshots with {adjacency_all[0][0].shape[0]} nodes each")
     print(f"SBM parameters: d={d}, k={k}, pin={pin}, pout={pout}, p_switch={p_switch}, n_sims={n_sims}, base_seed={base_seed}")
