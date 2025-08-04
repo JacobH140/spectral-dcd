@@ -854,10 +854,23 @@ def run_full_comparison_experiment():
     
     print("Generating dynamic SBM data...")
     # Generate dynamic SBM data
+    
+    d = 100
+    k = 2
+    pin = [0.3, 0.3]
+    pout = 0.2
+    p_switch = 0.01
+    n_sims =1
+    base_seed = 4
+    
     adjacency_all, _ = sbm_dynamic_model_2(
-        N=100, k=2, pin=[0.3, 0.3], pout=0.2, 
-        p_switch=0.01, T=50, Totalsims=1, base_seed=42, try_sparse=True
-    )
+        d=d, k=k, pin=pin, pout=pout, p_switch=p_switch,
+        n_sims=n_sims, base_seed=base_seed, try_sparse=True,)
+    
+    print(f"Generated {len(adjacency_all[0])} snapshots with {adjacency_all[0][0].shape[0]} nodes each")
+    print(f"SBM parameters: d={d}, k={k}, pin={pin}, pout={pout}, p_switch={p_switch}, n_sims={n_sims}, base_seed={base_seed}")
+    
+    
     
     # Convert to list of sparse matrices
     adjacency_sequence = [sp.csr_matrix(adj) for adj in adjacency_all[0]]
