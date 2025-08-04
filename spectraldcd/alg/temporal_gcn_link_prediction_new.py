@@ -864,10 +864,10 @@ def run_full_comparison_experiment():
     
     print(f"Generated {len(adjacency_sequence)} timesteps with {adjacency_sequence[0].shape[0]} nodes")
     
-    # Run experiments with all four encoding methods (including geodesic)
+    # Run experiments with laplacian and geodesic encoding methods
     results = {}
     
-    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
+    for encoding_type in ["laplacian", "geodesic"]:
         print(f"\n{'='*50}")
         print(f"Running experiment with {encoding_type.upper()} encoding")
         print(f"{'='*50}")
@@ -904,14 +904,14 @@ def run_full_comparison_experiment():
     
     # Collect all results
     all_results = {}
-    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
+    for encoding_type in ["laplacian", "geodesic"]:
         all_results[encoding_type] = {}
         for method in ['temporal', 'static']:
             df = pd.DataFrame(results[encoding_type][method]['results'])
             all_results[encoding_type][method] = df[['auc', 'ap', 'accuracy']].mean()
     
     # Show comparison for each encoding type
-    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
+    for encoding_type in ["laplacian", "geodesic"]:
         print(f"\n{encoding_type.upper()} ENCODING COMPARISON:")
         print(f"{'-'*40}")
         temporal_results = all_results[encoding_type]['temporal']
@@ -927,24 +927,23 @@ def run_full_comparison_experiment():
     print(f"{'='*70}")
     print(f"{'Encoding':<12} {'Method':<8} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
     print(f"{'-'*50}")
-    for encoding_type in ["laplacian", "identity", "none", "geodesic"]:
+    for encoding_type in ["laplacian", "geodesic"]:
         for method in ['temporal', 'static']:
             results_data = all_results[encoding_type][method]
             print(f"{encoding_type.title():<12} {method.title():<8} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
         print(f"{'-'*50}")
     
-    # Show encoding benefits relative to "none" baseline
-    print(f"\nENCODING BENEFITS (vs None baseline):")
+    # Show geodesic benefits relative to Laplacian baseline
+    print(f"\nGEODESIC BENEFITS (vs Laplacian baseline):")
     print(f"{'-'*50}")
-    none_temporal = all_results["none"]["temporal"]
-    none_static = all_results["none"]["static"]
+    laplacian_temporal = all_results["laplacian"]["temporal"]
+    laplacian_static = all_results["laplacian"]["static"]
+    geodesic_temporal = all_results["geodesic"]["temporal"]
+    geodesic_static = all_results["geodesic"]["static"]
     
-    for encoding_type in ["laplacian", "identity", "geodesic"]:
-        temporal_benefit = all_results[encoding_type]["temporal"]
-        static_benefit = all_results[encoding_type]["static"]
-        print(f"{encoding_type.title()} Temporal: AUC={temporal_benefit['auc']-none_temporal['auc']:+.4f}, AP={temporal_benefit['ap']-none_temporal['ap']:+.4f}, Acc={temporal_benefit['accuracy']-none_temporal['accuracy']:+.4f}")
-        print(f"{encoding_type.title()} Static:   AUC={static_benefit['auc']-none_static['auc']:+.4f}, AP={static_benefit['ap']-none_static['ap']:+.4f}, Acc={static_benefit['accuracy']-none_static['accuracy']:+.4f}")
-        print()
+    print(f"Geodesic Temporal: AUC={geodesic_temporal['auc']-laplacian_temporal['auc']:+.4f}, AP={geodesic_temporal['ap']-laplacian_temporal['ap']:+.4f}, Acc={geodesic_temporal['accuracy']-laplacian_temporal['accuracy']:+.4f}")
+    print(f"Geodesic Static:   AUC={geodesic_static['auc']-laplacian_static['auc']:+.4f}, AP={geodesic_static['ap']-laplacian_static['ap']:+.4f}, Acc={geodesic_static['accuracy']-laplacian_static['accuracy']:+.4f}")
+    print()
     
     return results
 
