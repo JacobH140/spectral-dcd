@@ -510,7 +510,7 @@ class SpectralGeodesicSmoother(ABC):
         print(f"Time to get geodesic embeddings: {time.time() - time_start}")
         
 
-def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_communities=False, mode='simple-nsc', fit_eigenvector_embeddings=False, smoothing_filter=None, smoothing_parameter=None, **mode_kwargs):
+def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_communities=False, mode='simple-nsc', fit_eigenvector_embeddings=False, smoothing_filter=None, smoothing_parameter=None, return_geo_embeddings_only=False,  **mode_kwargs):
     #print("spectral_geodesic_smoothing")
     T = len(sadj_list)
     if not isinstance(kc, list) and kc != 'auto':
@@ -555,8 +555,10 @@ def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_c
                               smoothing_parameter=smoothing_parameter,
                               **mode_kwargs)  
 
+    if return_geo_embeddings_only:
+        smoother.run_geo_embeddings()
+        return smoother.Us
     assignments = smoother.run_dcd()
-    
     return assignments, smoother.Us
 
 

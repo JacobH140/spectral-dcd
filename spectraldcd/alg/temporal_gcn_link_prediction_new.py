@@ -744,15 +744,19 @@ class TemporalLinkPredictionExperiment:
         }
     
     def run_comprehensive_experiment(self, adjacency_sequence: List[sp.csr_matrix], 
-                                   verbose: bool = True) -> Dict:
+                                   verbose: bool = True, include_static: bool = True) -> Dict:
         """Run comprehensive comparison experiment."""
         print(f"Running experiment with {self.encoding_type.upper()} encoding...")
         
         # Train temporal model
         temporal_results = self.train_temporal_model(adjacency_sequence, verbose)
         
-        # Train static models
-        static_results = self.train_static_models(adjacency_sequence, verbose)
+        # Train static models (optional)
+        static_results = None
+        if include_static:
+            static_results = self.train_static_models(adjacency_sequence, verbose)
+        else:
+            print("Skipping static baseline training...")
         
         return {
             'temporal': temporal_results,
@@ -762,13 +766,14 @@ class TemporalLinkPredictionExperiment:
                 'n_eigenvectors': self.n_eigenvectors,
                 'hidden_dim': self.hidden_dim,
                 'num_layers': self.num_layers,
+                'include_static': include_static
             }
         }
     
     def plot_results(self, experiment_results: Dict, save_path: Optional[str] = None):
         """Plot comparison results."""
         temporal_results = experiment_results['temporal']['results']
-        static_results = experiment_results['static']['results']
+        static_results = experiment_results['static']
         
         # Get encoding type for labels
         encoding_name = self.encoding_type.title()
@@ -777,10 +782,12 @@ class TemporalLinkPredictionExperiment:
         temporal_df = pd.DataFrame(temporal_results)
         temporal_df['method'] = f'Temporal GCN ({encoding_name})'
         
-        static_df = pd.DataFrame(static_results)
-        static_df['method'] = f'Static GCN ({encoding_name})'
-        
-        combined_df = pd.concat([temporal_df, static_df], ignore_index=True)
+        if static_results is not None:
+            static_df = pd.DataFrame(static_results['results'])
+            static_df['method'] = f'Static GCN ({encoding_name})'
+            combined_df = pd.concat([temporal_df, static_df], ignore_index=True)
+        else:
+            combined_df = temporal_df
         
         # Create plots
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -821,22 +828,26 @@ class TemporalLinkPredictionExperiment:
         print(f"Encoding: {encoding_type}")
         
         temporal_mean = temporal_df[['auc', 'ap', 'accuracy']].mean()
-        static_mean = static_df[['auc', 'ap', 'accuracy']].mean()
         
         print(f"\nTemporal GCN Average Performance:")
         print(f"  AUC: {temporal_mean['auc']:.4f}")
         print(f"  AP:  {temporal_mean['ap']:.4f}")
         print(f"  Acc: {temporal_mean['accuracy']:.4f}")
         
-        print(f"\nStatic GCN Average Performance:")
-        print(f"  AUC: {static_mean['auc']:.4f}")
-        print(f"  AP:  {static_mean['ap']:.4f}")
-        print(f"  Acc: {static_mean['accuracy']:.4f}")
-        
-        print(f"\nImprovement (Temporal - Static):")
-        print(f"  AUC: {temporal_mean['auc'] - static_mean['auc']:+.4f}")
-        print(f"  AP:  {temporal_mean['ap'] - static_mean['ap']:+.4f}")
-        print(f"  Acc: {temporal_mean['accuracy'] - static_mean['accuracy']:+.4f}")
+        if static_results is not None:
+            static_mean = static_df[['auc', 'ap', 'accuracy']].mean()
+            
+            print(f"\nStatic GCN Average Performance:")
+            print(f"  AUC: {static_mean['auc']:.4f}")
+            print(f"  AP:  {static_mean['ap']:.4f}")
+            print(f"  Acc: {static_mean['accuracy']:.4f}")
+            
+            print(f"\nImprovement (Temporal - Static):")
+            print(f"  AUC: {temporal_mean['auc'] - static_mean['auc']:+.4f}")
+            print(f"  AP:  {temporal_mean['ap'] - static_mean['ap']:+.4f}")
+            print(f"  Acc: {temporal_mean['accuracy'] - static_mean['accuracy']:+.4f}")
+        else:
+            print("\nStatic baselines were skipped.")
         
         return combined_df
 
@@ -864,6 +875,15 @@ def run_full_comparison_experiment():
     base_seed = 4
     T = 100
     
+    # Learning hyperparameters
+    n_eigenvectors = 32
+    hidden_dim = 64
+    num_layers = 2
+    dropout = 0.3
+    learning_rate = 0.01
+    epochs = 500
+    include_static = False  # Set to True to include static baselines (takes much longer)
+    
     adjacency_all, _ = sbm_dynamic_model_2(
         N=d, k=k, pin=pin, pout=pout, p_switch=p_switch,
         Totalsims=n_sims, T=T, base_seed=base_seed, try_sparse=True,)
@@ -888,16 +908,16 @@ def run_full_comparison_experiment():
         
         experiment = TemporalLinkPredictionExperiment(
             encoding_type=encoding_type,
-            n_eigenvectors=32,
-            hidden_dim=64,
-            num_layers=2,
-            dropout=0.3,
-            learning_rate=0.01,
-            epochs=500  # Reduced for faster testing
+            n_eigenvectors=n_eigenvectors,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            learning_rate=learning_rate,
+            epochs=epochs
         )
         
         experiment_results = experiment.run_comprehensive_experiment(
-            adjacency_sequence, verbose=True
+            adjacency_sequence, verbose=True, include_static=include_static
         )
         
         results[encoding_type] = experiment_results
@@ -915,9 +935,16 @@ def run_full_comparison_experiment():
     all_results = {}
     for encoding_type in ["laplacian", "geodesic"]:
         all_results[encoding_type] = {}
-        for method in ['temporal', 'static']:
-            df = pd.DataFrame(results[encoding_type][method]['results'])
-            all_results[encoding_type][method] = df[['auc', 'ap', 'accuracy']].mean()
+        # Always include temporal results
+        df = pd.DataFrame(results[encoding_type]['temporal']['results'])
+        all_results[encoding_type]['temporal'] = df[['auc', 'ap', 'accuracy']].mean()
+        
+        # Include static results only if they exist
+        if results[encoding_type]['static'] is not None:
+            df = pd.DataFrame(results[encoding_type]['static']['results'])
+            all_results[encoding_type]['static'] = df[['auc', 'ap', 'accuracy']].mean()
+        else:
+            all_results[encoding_type]['static'] = None
     
     # Show comparison for each encoding type
     for encoding_type in ["laplacian", "geodesic"]:
@@ -927,20 +954,38 @@ def run_full_comparison_experiment():
         static_results = all_results[encoding_type]['static']
         
         print(f"  Temporal GCN: AUC={temporal_results['auc']:.4f}, AP={temporal_results['ap']:.4f}, Acc={temporal_results['accuracy']:.4f}")
-        print(f"  Static GCN:   AUC={static_results['auc']:.4f}, AP={static_results['ap']:.4f}, Acc={static_results['accuracy']:.4f}")
-        print(f"  Improvement:  AUC={temporal_results['auc']-static_results['auc']:+.4f}, AP={temporal_results['ap']-static_results['ap']:+.4f}, Acc={temporal_results['accuracy']-static_results['accuracy']:+.4f}")
+        
+        if static_results is not None:
+            print(f"  Static GCN:   AUC={static_results['auc']:.4f}, AP={static_results['ap']:.4f}, Acc={static_results['accuracy']:.4f}")
+            print(f"  Improvement:  AUC={temporal_results['auc']-static_results['auc']:+.4f}, AP={temporal_results['ap']-static_results['ap']:+.4f}, Acc={temporal_results['accuracy']-static_results['accuracy']:+.4f}")
+        else:
+            print(f"  Static GCN:   (skipped)")
     
     # Summary table
-    print(f"\n{'='*70}")
-    print("SUMMARY TABLE - ALL RESULTS")
-    print(f"{'='*70}")
-    print(f"{'Encoding':<12} {'Method':<8} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
-    print(f"{'-'*50}")
-    for encoding_type in ["laplacian", "geodesic"]:
-        for method in ['temporal', 'static']:
-            results_data = all_results[encoding_type][method]
-            print(f"{encoding_type.title():<12} {method.title():<8} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
+    if include_static:
+        print(f"\n{'='*70}")
+        print("SUMMARY TABLE - ALL RESULTS")
+        print(f"{'='*70}")
+        print(f"{'Encoding':<12} {'Method':<8} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
         print(f"{'-'*50}")
+        for encoding_type in ["laplacian", "geodesic"]:
+            for method in ['temporal', 'static']:
+                if all_results[encoding_type][method] is not None:
+                    results_data = all_results[encoding_type][method]
+                    print(f"{encoding_type.title():<12} {method.title():<8} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
+                else:
+                    print(f"{encoding_type.title():<12} {method.title():<8} {'(skipped)':<8} {'(skipped)':<8} {'(skipped)':<8}")
+            print(f"{'-'*50}")
+    else:
+        print(f"\n{'='*70}")
+        print("SUMMARY TABLE - TEMPORAL RESULTS ONLY")
+        print(f"{'='*70}")
+        print(f"{'Encoding':<12} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
+        print(f"{'-'*40}")
+        for encoding_type in ["laplacian", "geodesic"]:
+            results_data = all_results[encoding_type]['temporal']
+            print(f"{encoding_type.title():<12} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
+        print(f"{'-'*40}")
     
     # Show geodesic benefits relative to Laplacian baseline
     print(f"\nGEODESIC BENEFITS (vs Laplacian baseline):")
@@ -951,7 +996,11 @@ def run_full_comparison_experiment():
     geodesic_static = all_results["geodesic"]["static"]
     
     print(f"Geodesic Temporal: AUC={geodesic_temporal['auc']-laplacian_temporal['auc']:+.4f}, AP={geodesic_temporal['ap']-laplacian_temporal['ap']:+.4f}, Acc={geodesic_temporal['accuracy']-laplacian_temporal['accuracy']:+.4f}")
-    print(f"Geodesic Static:   AUC={geodesic_static['auc']-laplacian_static['auc']:+.4f}, AP={geodesic_static['ap']-laplacian_static['ap']:+.4f}, Acc={geodesic_static['accuracy']-laplacian_static['accuracy']:+.4f}")
+    
+    if laplacian_static is not None and geodesic_static is not None:
+        print(f"Geodesic Static:   AUC={geodesic_static['auc']-laplacian_static['auc']:+.4f}, AP={geodesic_static['ap']-laplacian_static['ap']:+.4f}, Acc={geodesic_static['accuracy']-laplacian_static['accuracy']:+.4f}")
+    else:
+        print(f"Geodesic Static:   (skipped - no static baselines)")
     print()
     
     return results
