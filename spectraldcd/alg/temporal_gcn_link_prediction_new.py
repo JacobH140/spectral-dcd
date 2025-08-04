@@ -84,7 +84,7 @@ class GeodesicTemporalEncoder:
             num_nodes = adjacency_sequence[0].shape[0]
             
             # Run spectral geodesic smoothing to get temporally smoothed embeddings
-            _, embeddings_sequence = spectral_geodesic_smoothing(
+            embeddings_sequence = spectral_geodesic_smoothing(
                 adjacency_sequence, 
                 T=T, 
                 num_nodes=num_nodes, 
@@ -873,13 +873,14 @@ def run_full_comparison_experiment():
     p_switch = 0.01
     n_sims =1
     base_seed = 4
-    T = 100
+    T = 50
     
     # Learning hyperparameters
     n_eigenvectors = 32
     hidden_dim = 64
     num_layers = 2
     dropout = 0.3
+    input_dropout = 0.5  # Dropout for first layer (set to None to use same as dropout)
     learning_rate = 0.01
     epochs = 500
     include_static = False  # Set to True to include static baselines (takes much longer)
@@ -912,6 +913,7 @@ def run_full_comparison_experiment():
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             dropout=dropout,
+            input_dropout=input_dropout,
             learning_rate=learning_rate,
             epochs=epochs
         )
