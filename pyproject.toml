@@ -102,4 +102,6 @@ requires = [
     "Werkzeug",
     "wxPython",
     "xyzservices",
+    "torch",
+    "torch-geometric",
 ]

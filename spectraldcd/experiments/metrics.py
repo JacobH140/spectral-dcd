@@ -16,10 +16,10 @@ from cdlib import FuzzyNodeClustering
 import cdlib
 from scipy.special import xlogy
 from collections import Counter, defaultdict
-from geodesicdcd.experiments.TreeNode_class import TreeNode
+#from geodesicdcd.experiments.TreeNode_class import TreeNode
 from sklearn.metrics import adjusted_mutual_info_score
-import geodesicdcd.experiments.elementcentric_similarity_overlapping as elm
-import geodesicdcd.experiments.elementcentric_similarity_hierarchical as elh
+#import geodesicdcd.experiments.elementcentric_similarity_overlapping as elm
+#import geodesicdcd.experiments.elementcentric_similarity_hierarchical as elh
 
 
 
@@ -148,6 +148,7 @@ def compute_and_plot_hnmis(predicted_labels, true_labels, graphs=None, figure=No
 
 
 def compute_and_plot_hecs(predicted_labels, true_labels, graphs=None, figure=None, plot_label=None, plot=True):
+    print("compute_and_plot_hecs is deprecated here")
     hecs = []
     for i in range(len(predicted_labels)):
         hec = elh.compare_tree_lists_ecs(predicted_labels[i], true_labels[i])
@@ -322,6 +323,7 @@ def NMI_max(X, Y):
     return I_XY / max(H_X, H_Y)
 
 def compute_and_plot_overlapping_elementwise_similarities(predicted_labels, true_labels, graphs=None, threshold=0.2, figure=None, plot_label=None, plot=False):
+    print("compute_and_plot_overlapping_elementwise_similarities is deprecated here")
     oews = []
     for i in range(len(predicted_labels)):
         thresholded_predicted_labels = predicted_labels[i] >= threshold

@@ -447,6 +447,7 @@ class SpectralGeodesicSmoother(ABC):
     # this overwritten sometimes by subclasses
     def clustering_Euclidean(self):
         T = len(self.Us)
+        #print("kc_list:", self.kc_list)
 
         if all(k == self.kc_list[0] for k in self.kc_list):  # Constant kc_list
             print("Using constant kc_list")
@@ -494,16 +495,20 @@ class SpectralGeodesicSmoother(ABC):
         
     
     # this is never overwritten by subclasses 
-    def run(self):
+    def run_dcd(self):
+        self.run_geo_embeddings()
+        time_start = time.time()
+        assignments = self.clustering_Euclidean()
+        return assignments 
+    
+    def run_geo_embeddings(self):
         time_start = time.time()
         self.make_clustering_matrices()
         self.make_modeled_clustering_matrices() 
         time_start = time.time()
         self.get_geodesic_embeddings()
         print(f"Time to get geodesic embeddings: {time.time() - time_start}")
-        time_start = time.time()
-        assignments = self.clustering_Euclidean()
-        return assignments 
+        
 
 def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_communities=False, mode='simple-nsc', fit_eigenvector_embeddings=False, smoothing_filter=None, smoothing_parameter=None, **mode_kwargs):
     #print("spectral_geodesic_smoothing")
@@ -550,7 +555,7 @@ def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_c
                               smoothing_parameter=smoothing_parameter,
                               **mode_kwargs)  
 
-    assignments = smoother.run()
+    assignments = smoother.run_dcd()
     
     return assignments, smoother.Us
 
@@ -674,7 +679,9 @@ class Hierarchical(SpectralGeodesicSmoother):
 
 class NSC(Simple):
     def make_clustering_matrix(self, sadj):
-        pass # we override the full make_modeled_clustering_matrices method using normalized_signless_laplacian
+        pass # we override the full make_modeled_clustering_matrices method using normalized_signless_laplacian (recall that normalized signless laplacian SVD is equivalent to spectral clustering with normalized graph laplacian)
+    
+
     
     @staticmethod
     def normalized_signless_laplacian(A):
