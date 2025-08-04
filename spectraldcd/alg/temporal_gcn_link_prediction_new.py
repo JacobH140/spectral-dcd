@@ -63,11 +63,8 @@ class LaplacianEigenvectorEncoder:
 class GeodesicTemporalEncoder:
     """Encodes node features using geodesic smoothing across time."""
     
-    def __init__(self, n_eigenvectors: int = 64, smoothing_filter: str = 'median', 
-                 smoothing_parameter: int = 5):
+    def __init__(self, n_eigenvectors: int = 64):
         self.n_eigenvectors = n_eigenvectors
-        self.smoothing_filter = smoothing_filter
-        self.smoothing_parameter = smoothing_parameter
         self.embeddings_sequence = None
         
     def fit_transform_sequence(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
@@ -94,8 +91,7 @@ class GeodesicTemporalEncoder:
                 ke=self.n_eigenvectors,
                 stable_communities=False,
                 mode='simple-nsc',
-                smoothing_filter=self.smoothing_filter,
-                smoothing_parameter=self.smoothing_parameter
+                return_geo_embeddings_only=True,
             )
             
             # Process embeddings to ensure consistent dimensionality
@@ -306,8 +302,6 @@ class TemporalLinkPredictionExperiment:
                  input_dropout: float = None,
                  learning_rate: float = 0.01,
                  epochs: int = 200,
-                 smoothing_filter: str = 'median',
-                 smoothing_parameter: int = 5,
                  device: str = 'auto'):
         """
         Initialize experiment.
@@ -321,8 +315,6 @@ class TemporalLinkPredictionExperiment:
             input_dropout: Dropout rate for first layer (defaults to dropout if None)
             learning_rate: Learning rate
             epochs: Training epochs
-            smoothing_filter: Filter type for geodesic smoothing ('median', 'gaussian')
-            smoothing_parameter: Parameter for smoothing filter
             device: Computing device
         """
         self.encoding_type = encoding_type
@@ -333,8 +325,6 @@ class TemporalLinkPredictionExperiment:
         self.input_dropout = input_dropout
         self.learning_rate = learning_rate
         self.epochs = epochs
-        self.smoothing_filter = smoothing_filter
-        self.smoothing_parameter = smoothing_parameter
         
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -346,9 +336,7 @@ class TemporalLinkPredictionExperiment:
         if encoding_type == "laplacian":
             self.encoder = LaplacianEigenvectorEncoder(n_eigenvectors)
         elif encoding_type == "geodesic":
-            self.geodesic_encoder = GeodesicTemporalEncoder(
-                n_eigenvectors, smoothing_filter, smoothing_parameter
-            )
+            self.geodesic_encoder = GeodesicTemporalEncoder(n_eigenvectors)
     
     def _prepare_features(self, adjacency_matrix: sp.csr_matrix) -> np.ndarray:
         """Prepare node features based on encoding method (for single timestep)."""
@@ -898,9 +886,6 @@ def run_full_comparison_experiment():
         print(f"Running experiment with {encoding_type.upper()} encoding")
         print(f"{'='*50}")
         
-        # Adjust parameters for geodesic encoding
-        smoothing_param = 11 if encoding_type == "geodesic" else 5
-        
         experiment = TemporalLinkPredictionExperiment(
             encoding_type=encoding_type,
             n_eigenvectors=32,
@@ -908,9 +893,7 @@ def run_full_comparison_experiment():
             num_layers=2,
             dropout=0.3,
             learning_rate=0.01,
-            epochs=500,  # Reduced for faster testing
-            smoothing_filter='median',
-            smoothing_parameter=smoothing_param
+            epochs=500  # Reduced for faster testing
         )
         
         experiment_results = experiment.run_comprehensive_experiment(
