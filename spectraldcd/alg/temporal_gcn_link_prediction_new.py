@@ -138,15 +138,20 @@ class GeodesicTemporalEncoder:
 class TemporalGCNCell(nn.Module):
     """Single temporal GCN cell with GRU-like update mechanism."""
     
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.5):
+    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.5, input_dropout: float = None):
         super(TemporalGCNCell, self).__init__()
         
         self.hidden_dim = hidden_dim
         self.dropout = dropout
+        self.input_dropout = input_dropout if input_dropout is not None else dropout
         
         # GCN layers for current timestep
         self.gcn_input = GCNConv(input_dim, hidden_dim)
         self.gcn_hidden = GCNConv(hidden_dim, hidden_dim)
+        
+        # Layer normalization
+        self.layer_norm_input = nn.LayerNorm(hidden_dim)
+        self.layer_norm_hidden = nn.LayerNorm(hidden_dim)
         
         # Temporal update mechanism (GRU-like)
         self.update_gate = nn.Linear(2 * hidden_dim, hidden_dim)
@@ -168,10 +173,12 @@ class TemporalGCNCell(nn.Module):
         """
         # Process current graph structure
         current_embedding = self.gcn_input(x, edge_index)
+        current_embedding = self.layer_norm_input(current_embedding)
         current_embedding = F.relu(current_embedding)
-        current_embedding = F.dropout(current_embedding, p=self.dropout, training=self.training)
+        current_embedding = F.dropout(current_embedding, p=self.input_dropout, training=self.training)
         
         current_embedding = self.gcn_hidden(current_embedding, edge_index)
+        current_embedding = self.layer_norm_hidden(current_embedding)
         
         # Initialize hidden state if None
         if hidden_state is None:
@@ -200,7 +207,7 @@ class TemporalGCNCell(nn.Module):
 class TemporalGCNLinkPredictor(nn.Module):
     """Temporal Graph Convolutional Network for dynamic link prediction."""
     
-    def __init__(self, input_dim: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.5):
+    def __init__(self, input_dim: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.5, input_dropout: float = None):
         super(TemporalGCNLinkPredictor, self).__init__()
         
         self.hidden_dim = hidden_dim
@@ -210,7 +217,9 @@ class TemporalGCNLinkPredictor(nn.Module):
         self.cells = nn.ModuleList()
         for i in range(num_layers):
             cell_input_dim = input_dim if i == 0 else hidden_dim
-            self.cells.append(TemporalGCNCell(cell_input_dim, hidden_dim, dropout))
+            # Use input_dropout for first layer, regular dropout for others
+            cell_dropout = input_dropout if i == 0 and input_dropout is not None else dropout
+            self.cells.append(TemporalGCNCell(cell_input_dim, hidden_dim, dropout, cell_dropout))
         
         # Final projection layer
         self.output_projection = nn.Linear(hidden_dim, hidden_dim)
@@ -294,6 +303,7 @@ class TemporalLinkPredictionExperiment:
                  hidden_dim: int = 64,
                  num_layers: int = 2,
                  dropout: float = 0.5,
+                 input_dropout: float = None,
                  learning_rate: float = 0.01,
                  epochs: int = 200,
                  smoothing_filter: str = 'median',
@@ -308,6 +318,7 @@ class TemporalLinkPredictionExperiment:
             hidden_dim: Hidden dimension for temporal GCN
             num_layers: Number of temporal layers
             dropout: Dropout rate
+            input_dropout: Dropout rate for first layer (defaults to dropout if None)
             learning_rate: Learning rate
             epochs: Training epochs
             smoothing_filter: Filter type for geodesic smoothing ('median', 'gaussian')
@@ -319,6 +330,7 @@ class TemporalLinkPredictionExperiment:
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
+        self.input_dropout = input_dropout
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.smoothing_filter = smoothing_filter
@@ -438,7 +450,7 @@ class TemporalLinkPredictionExperiment:
         
         # Initialize model
         input_dim = all_data[0].x.shape[1]
-        model = TemporalGCNLinkPredictor(input_dim, self.hidden_dim, self.num_layers, self.dropout).to(self.device)
+        model = TemporalGCNLinkPredictor(input_dim, self.hidden_dim, self.num_layers, self.dropout, self.input_dropout).to(self.device)
         
         if verbose:
             print(f"Model device: {next(model.parameters()).device}")
@@ -862,10 +874,11 @@ def run_full_comparison_experiment():
     p_switch = 0.01
     n_sims =1
     base_seed = 4
+    T = 100
     
     adjacency_all, _ = sbm_dynamic_model_2(
         N=d, k=k, pin=pin, pout=pout, p_switch=p_switch,
-        Totalsims=n_sims, base_seed=base_seed, try_sparse=True,)
+        Totalsims=n_sims, T=T, base_seed=base_seed, try_sparse=True,)
     
     print(f"Generated {len(adjacency_all[0])} snapshots with {adjacency_all[0][0].shape[0]} nodes each")
     print(f"SBM parameters: d={d}, k={k}, pin={pin}, pout={pout}, p_switch={p_switch}, n_sims={n_sims}, base_seed={base_seed}")
@@ -894,7 +907,7 @@ def run_full_comparison_experiment():
             hidden_dim=64,
             num_layers=2,
             dropout=0.3,
-            learning_rate=0.001,
+            learning_rate=0.01,
             epochs=500,  # Reduced for faster testing
             smoothing_filter='median',
             smoothing_parameter=smoothing_param
