@@ -15,6 +15,8 @@ from typing import Tuple, Optional, List, Union, Dict
 import pandas as pd
 from collections import defaultdict
 import warnings
+import pickle
+import os
 warnings.filterwarnings('ignore')
 
 
@@ -501,7 +503,7 @@ class TemporalLinkPredictionExperiment:
         return data_sequence
     
     def train_temporal_model(self, adjacency_sequence: List[sp.csr_matrix], 
-                             verbose: bool = True) -> Dict:
+                             verbose: bool = True, auto_save_path: Optional[str] = None) -> Dict:
         """Train temporal GCN model using temporal link forecasting."""
         print("Training Temporal GCN with Link Forecasting...")
         
@@ -593,7 +595,7 @@ class TemporalLinkPredictionExperiment:
         # Final evaluation on test set
         test_results = self._evaluate_temporal_model(model, train_data + val_data, test_data)
         
-        return {
+        results = {
             'model': model,
             'best_val_auc': best_val_auc,
             'results': test_results,
@@ -601,6 +603,33 @@ class TemporalLinkPredictionExperiment:
             'val_snapshots': len(val_snapshots),
             'test_snapshots': len(test_snapshots)
         }
+        
+        # Auto-save if path is provided
+        if auto_save_path is not None:
+            temp_experiment_results = {
+                'temporal': results,
+                'static': None,  # Not available in individual model training
+                'experiment_config': {
+                    'encoding_type': self.encoding_type,
+                    'n_eigenvectors': self.n_eigenvectors,
+                    'canonicalize_sign': self.canonicalize_sign,
+                    'hidden_dim': self.hidden_dim,
+                    'num_layers': self.num_layers,
+                    'dropout': self.dropout,
+                    'input_dropout': self.input_dropout,
+                    'learning_rate': self.learning_rate,
+                    'weight_decay': self.weight_decay,
+                    'epochs': self.epochs,
+                    'device': str(self.device),
+                    'include_static': False
+                }
+            }
+            self.save_experiment_state(temp_experiment_results, auto_save_path, 
+                                       save_data=False, adjacency_sequence=None)
+            if verbose:
+                print(f"Model auto-saved to: {auto_save_path}")
+        
+        return results
     
     def _validate_temporal_model(self, model, train_data, val_data):
         """Validate temporal model on validation snapshots."""
@@ -826,7 +855,8 @@ class TemporalLinkPredictionExperiment:
         }
     
     def run_comprehensive_experiment(self, adjacency_sequence: List[sp.csr_matrix], 
-                                     verbose: bool = True, include_static: bool = True) -> Dict:
+                                     verbose: bool = True, include_static: bool = True, 
+                                     save_path: Optional[str] = None, save_data: bool = False) -> Dict:
         """Run comprehensive comparison experiment."""
         print(f"Running experiment with {self.encoding_type.upper()} encoding...")
         
@@ -840,7 +870,7 @@ class TemporalLinkPredictionExperiment:
         else:
             print("Skipping static baseline training...")
         
-        return {
+        experiment_results = {
             'temporal': temporal_results,
             'static': static_results,
             'experiment_config': {
@@ -849,9 +879,24 @@ class TemporalLinkPredictionExperiment:
                 'canonicalize_sign': self.canonicalize_sign,
                 'hidden_dim': self.hidden_dim,
                 'num_layers': self.num_layers,
+                'dropout': self.dropout,
+                'input_dropout': self.input_dropout,
+                'learning_rate': self.learning_rate,
+                'weight_decay': self.weight_decay,
+                'epochs': self.epochs,
+                'device': str(self.device),
                 'include_static': include_static
             }
         }
+        
+        # Auto-save if path is provided
+        if save_path is not None:
+            self.save_experiment_state(experiment_results, save_path, 
+                                       save_data=save_data, adjacency_sequence=adjacency_sequence if save_data else None)
+            if verbose:
+                print(f"Complete experiment results saved to: {save_path}")
+        
+        return experiment_results
     
     def plot_results(self, experiment_results: Dict, save_path: Optional[str] = None):
         """Plot comparison results."""
@@ -934,6 +979,348 @@ class TemporalLinkPredictionExperiment:
             print("\nStatic baselines were skipped.")
         
         return combined_df
+    
+    def save_experiment_state(self, experiment_results: Dict, save_path: str, 
+                              save_data: bool = False, adjacency_sequence: Optional[List] = None):
+        """
+        Save complete experiment state including model weights, hyperparameters, and results.
+        
+        Args:
+            experiment_results: Results from run_comprehensive_experiment()
+            save_path: Path to save the experiment state (without extension)
+            save_data: Whether to also save the adjacency sequence data
+            adjacency_sequence: The adjacency sequence data (required if save_data=True)
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        
+        # Prepare the complete state to save
+        save_state = {
+            'experiment_results': experiment_results,
+            'model_class': 'TemporalGCNLinkPredictor',
+            'encoder_class': type(self.encoder).__name__ if self.encoder else None,
+            'geodesic_encoder_class': type(self.geodesic_encoder).__name__ if self.geodesic_encoder else None,
+            'timestamp': pd.Timestamp.now().isoformat(),
+        }
+        
+        # Add encoder states if they exist
+        if self.encoder:
+            save_state['encoder_config'] = {
+                'n_eigenvectors': self.encoder.n_eigenvectors,
+                'normalized': self.encoder.normalized,
+                'canonicalize_sign': self.encoder.canonicalize_sign
+            }
+            
+        if self.geodesic_encoder:
+            save_state['geodesic_encoder_config'] = {
+                'n_eigenvectors': self.geodesic_encoder.n_eigenvectors,
+                'canonicalize_sign': self.geodesic_encoder.canonicalize_sign
+            }
+            # Save the embeddings sequence if it exists
+            if hasattr(self.geodesic_encoder, 'embeddings_sequence') and self.geodesic_encoder.embeddings_sequence:
+                save_state['geodesic_embeddings_sequence'] = self.geodesic_encoder.embeddings_sequence
+        
+        # Save adjacency sequence data if requested
+        if save_data and adjacency_sequence is not None:
+            save_state['adjacency_sequence'] = adjacency_sequence
+            print(f"Saved adjacency sequence with {len(adjacency_sequence)} timesteps")
+        
+        # Save the main state file
+        with open(f"{save_path}.pkl", 'wb') as f:
+            pickle.dump(save_state, f)
+        
+        # Also save just the model weights separately for easier access
+        temporal_model = experiment_results['temporal']['model']
+        torch.save({
+            'model_state_dict': temporal_model.state_dict(),
+            'model_config': {
+                'input_dim': temporal_model.cells[0].gcn_input.in_channels,
+                'hidden_dim': temporal_model.hidden_dim,
+                'num_layers': temporal_model.num_layers,
+            }
+        }, f"{save_path}_model_weights.pth")
+        
+        # Save summary metrics as JSON for easy reading
+        import json
+        temporal_results = experiment_results['temporal']['results']
+        if temporal_results:
+            temporal_df = pd.DataFrame(temporal_results)
+            summary_metrics = {
+                'final_metrics': {
+                    'mean_auc': float(temporal_df['auc'].mean()),
+                    'mean_ap': float(temporal_df['ap'].mean()),
+                    'mean_accuracy': float(temporal_df['accuracy'].mean()),
+                    'std_auc': float(temporal_df['auc'].std()),
+                    'std_ap': float(temporal_df['ap'].std()),
+                    'std_accuracy': float(temporal_df['accuracy'].std()),
+                    'best_val_auc': float(experiment_results['temporal']['best_val_auc']),
+                },
+                'experiment_config': experiment_results['experiment_config'],
+                'training_info': {
+                    'train_snapshots': experiment_results['temporal']['train_snapshots'],
+                    'val_snapshots': experiment_results['temporal']['val_snapshots'],
+                    'test_snapshots': experiment_results['temporal']['test_snapshots'],
+                }
+            }
+            
+            with open(f"{save_path}_summary.json", 'w') as f:
+                json.dump(summary_metrics, f, indent=2)
+        
+        print(f"Experiment state saved to:")
+        print(f"  - Complete state: {save_path}.pkl")
+        print(f"  - Model weights: {save_path}_model_weights.pth")
+        print(f"  - Summary metrics: {save_path}_summary.json")
+        
+        if save_data:
+            print(f"  - Including adjacency sequence data")
+            
+        return save_path
+    
+    @classmethod
+    def load_experiment_state(cls, save_path: str, device: str = 'auto'):
+        """
+        Load complete experiment state from saved files.
+        
+        Args:
+            save_path: Path to the saved experiment state (without extension)
+            device: Device to load the model on ('auto', 'cpu', 'cuda', etc.)
+            
+        Returns:
+            Tuple of (experiment_instance, experiment_results, adjacency_sequence)
+        """
+        # Load the main state file
+        with open(f"{save_path}.pkl", 'rb') as f:
+            save_state = pickle.load(f)
+        
+        experiment_results = save_state['experiment_results']
+        config = experiment_results['experiment_config']
+        
+        # Set device
+        if device == 'auto':
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            device = torch.device(device)
+        
+        # Create experiment instance with saved configuration
+        experiment = cls(
+            encoding_type=config['encoding_type'],
+            n_eigenvectors=config['n_eigenvectors'],
+            canonicalize_sign=config['canonicalize_sign'],
+            hidden_dim=config['hidden_dim'],
+            num_layers=config['num_layers'],
+            dropout=config['dropout'],
+            input_dropout=config['input_dropout'],
+            learning_rate=config['learning_rate'],
+            weight_decay=config['weight_decay'],
+            epochs=config['epochs'],
+            device=device
+        )
+        
+        # Restore encoder states if they exist
+        if 'encoder_config' in save_state and save_state['encoder_config']:
+            enc_config = save_state['encoder_config']
+            experiment.encoder = LaplacianEigenvectorEncoder(
+                n_eigenvectors=enc_config['n_eigenvectors'],
+                normalized=enc_config['normalized'],
+                canonicalize_sign=enc_config['canonicalize_sign']
+            )
+        
+        if 'geodesic_encoder_config' in save_state and save_state['geodesic_encoder_config']:
+            geo_config = save_state['geodesic_encoder_config']
+            experiment.geodesic_encoder = GeodesicTemporalEncoder(
+                n_eigenvectors=geo_config['n_eigenvectors'],
+                canonicalize_sign=geo_config['canonicalize_sign']
+            )
+            # Restore embeddings sequence if it was saved
+            if 'geodesic_embeddings_sequence' in save_state:
+                experiment.geodesic_encoder.embeddings_sequence = save_state['geodesic_embeddings_sequence']
+        
+        # Load the trained model
+        temporal_model = experiment_results['temporal']['model']
+        if hasattr(temporal_model, 'to'):
+            temporal_model = temporal_model.to(device)
+        experiment_results['temporal']['model'] = temporal_model
+        
+        # Get adjacency sequence if it was saved
+        adjacency_sequence = save_state.get('adjacency_sequence', None)
+        
+        print(f"Loaded experiment state from:")
+        print(f"  - Save path: {save_path}")
+        print(f"  - Encoding: {config['encoding_type']}")
+        print(f"  - Device: {device}")
+        if 'timestamp' in save_state:
+            print(f"  - Saved on: {save_state['timestamp']}")
+        
+        return experiment, experiment_results, adjacency_sequence
+    
+    @classmethod
+    def load_trained_model(cls, save_path: str, device: str = 'auto'):
+        """
+        Load only the trained model for inference (faster than loading full experiment state).
+        
+        Args:
+            save_path: Path to the saved model weights (without extension)
+            device: Device to load the model on ('auto', 'cpu', 'cuda', etc.)
+            
+        Returns:
+            Tuple of (model, model_config, experiment_config)
+        """
+        # Set device
+        if device == 'auto':
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            device = torch.device(device)
+        
+        # Load model weights and config
+        model_data = torch.load(f"{save_path}_model_weights.pth", map_location=device)
+        model_config = model_data['model_config']
+        
+        # Load experiment config for context
+        with open(f"{save_path}.pkl", 'rb') as f:
+            save_state = pickle.load(f)
+        experiment_config = save_state['experiment_results']['experiment_config']
+        
+        # Create model instance
+        model = TemporalGCNLinkPredictor(
+            input_dim=model_config['input_dim'],
+            hidden_dim=model_config['hidden_dim'],
+            num_layers=model_config['num_layers'],
+            dropout=experiment_config['dropout'],
+            input_dropout=experiment_config['input_dropout']
+        ).to(device)
+        
+        # Load the trained weights
+        model.load_state_dict(model_data['model_state_dict'])
+        model.eval()  # Set to evaluation mode
+        
+        print(f"Loaded trained model from: {save_path}_model_weights.pth")
+        print(f"  - Model architecture: {model_config}")
+        print(f"  - Device: {device}")
+        
+        return model, model_config, experiment_config
+    
+    @classmethod
+    def predict_from_saved_model(cls, save_path: str, adjacency_sequence: List[sp.csr_matrix], 
+                                 device: str = 'auto', verbose: bool = True):
+        """
+        Load a saved model and make predictions on new adjacency sequence data.
+        
+        Args:
+            save_path: Path to the saved model (without extension)
+            adjacency_sequence: New adjacency sequence to make predictions on
+            device: Device to run inference on ('auto', 'cpu', 'cuda', etc.)
+            verbose: Whether to print progress information
+            
+        Returns:
+            Dictionary containing predictions and evaluation metrics for each timestep
+        """
+        if verbose:
+            print(f"Loading model for inference from: {save_path}")
+        
+        # Load the experiment state to get the preprocessing setup
+        experiment, experiment_results, _ = cls.load_experiment_state(save_path, device)
+        model = experiment_results['temporal']['model']
+        
+        if verbose:
+            print(f"Model loaded. Making predictions on {len(adjacency_sequence)} timesteps...")
+        
+        # Prepare the data using the same preprocessing as during training
+        data_sequence = experiment._create_temporal_data(adjacency_sequence)
+        
+        # Move data to device
+        for i in range(len(data_sequence)):
+            data_sequence[i] = data_sequence[i].to(experiment.device)
+        
+        # Make predictions
+        model.eval()
+        predictions = []
+        
+        with torch.no_grad():
+            # Forward pass through the entire sequence
+            x_sequence = [data.x for data in data_sequence]
+            edge_index_sequence = [data.edge_index for data in data_sequence]
+            embeddings_sequence = model(x_sequence, edge_index_sequence)
+            
+            # Generate predictions for each timestep (predicting t+1 from t)
+            for t in range(len(data_sequence) - 1):
+                current_embeddings = embeddings_sequence[t]
+                next_data = data_sequence[t + 1]
+                
+                # Use actual edges from next timestep as positive samples
+                pos_edges = next_data.edge_index
+                
+                # Generate negative samples
+                from torch_geometric.utils import negative_sampling
+                neg_edges = negative_sampling(
+                    edge_index=pos_edges,
+                    num_nodes=next_data.num_nodes,
+                    num_neg_samples=pos_edges.shape[1]
+                ).to(experiment.device)
+                
+                # Predict link probabilities
+                pos_pred = model.predict_links(current_embeddings, pos_edges)
+                neg_pred = model.predict_links(current_embeddings, neg_edges)
+                
+                # Combine predictions
+                y_pred = torch.cat([pos_pred, neg_pred]).cpu().numpy()
+                y_true = np.concatenate([
+                    np.ones(pos_pred.size(0)),
+                    np.zeros(neg_pred.size(0))
+                ])
+                
+                # Calculate metrics
+                from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
+                
+                if len(np.unique(y_true)) > 1:  # Need both classes for AUC
+                    auc_score = roc_auc_score(y_true, y_pred)
+                    ap_score = average_precision_score(y_true, y_pred)
+                    accuracy = accuracy_score(y_true, y_pred > 0.5)
+                    
+                    prediction_result = {
+                        'timestep': t,
+                        'target_timestep': t + 1,
+                        'auc': auc_score,
+                        'ap': ap_score,
+                        'accuracy': accuracy,
+                        'n_edges': pos_edges.shape[1],
+                        'predictions': y_pred,
+                        'true_labels': y_true,
+                        'pos_edges': pos_edges.cpu().numpy(),
+                        'neg_edges': neg_edges.cpu().numpy()
+                    }
+                    
+                    predictions.append(prediction_result)
+                    
+                    if verbose and (t + 1) % 10 == 0:
+                        print(f"  Timestep {t+1}/{len(data_sequence)-1} - AUC: {auc_score:.4f}, AP: {ap_score:.4f}")
+        
+        # Calculate summary statistics
+        if predictions:
+            pred_df = pd.DataFrame([{k: v for k, v in pred.items() if k not in ['predictions', 'true_labels', 'pos_edges', 'neg_edges']} 
+                                   for pred in predictions])
+            summary_stats = {
+                'mean_auc': pred_df['auc'].mean(),
+                'mean_ap': pred_df['ap'].mean(),
+                'mean_accuracy': pred_df['accuracy'].mean(),
+                'std_auc': pred_df['auc'].std(),
+                'std_ap': pred_df['ap'].std(),
+                'std_accuracy': pred_df['accuracy'].std(),
+                'n_timesteps': len(predictions)
+            }
+            
+            if verbose:
+                print(f"\nPrediction Summary:")
+                print(f"  Mean AUC: {summary_stats['mean_auc']:.4f} ± {summary_stats['std_auc']:.4f}")
+                print(f"  Mean AP:  {summary_stats['mean_ap']:.4f} ± {summary_stats['std_ap']:.4f}")
+                print(f"  Mean Acc: {summary_stats['mean_accuracy']:.4f} ± {summary_stats['std_accuracy']:.4f}")
+        else:
+            summary_stats = {}
+        
+        return {
+            'predictions': predictions,
+            'summary_stats': summary_stats,
+            'model_config': experiment_results['experiment_config']
+        }
 
 
 def run_full_comparison_experiment():
@@ -1127,12 +1514,12 @@ def run_tnetwork_benchmark_experiment():
     results = {}
     
     # Parameters for benchmark
-    n_eigenvectors = 8
+    n_eigenvectors = 32
     hidden_dim = 32
     num_layers = 2
-    dropout = 0.4
+    dropout = 0.5
     input_dropout = 0.1
-    learning_rate = 1e-4
+    learning_rate = 5e-4
     weight_decay = 1e-4
     epochs = 200
     
@@ -1147,7 +1534,7 @@ def run_tnetwork_benchmark_experiment():
     print(f"  epochs: {epochs}")
     
     for encoding_type in ["laplacian", "geodesic"]:
-        for canonicalize in [False, True]:
+        for canonicalize in [False]:
             print(f"\n{'-'*50}")
             print(f"Running experiment with {encoding_type.upper()} encoding and canonicalization={canonicalize}")
             print(f"{'-'*50}")
@@ -1219,9 +1606,89 @@ def run_tnetwork_benchmark_experiment():
     return results
 
 
+def example_save_load_usage():
+    """
+    Example of how to use the new save/load functionality.
+    """
+    print("=" * 60)
+    print("EXAMPLE: SAVING AND LOADING MODELS")
+    print("=" * 60)
+    
+    # Example 1: Training with auto-saving
+    print("\n1. Training a model with auto-saving...")
+    
+    # Create some dummy data for demonstration
+    import scipy.sparse as sp
+    import numpy as np
+    
+    # Generate a small temporal network sequence
+    n_nodes = 50
+    n_timesteps = 10
+    adjacency_sequence = []
+    np.random.seed(42)
+    
+    for t in range(n_timesteps):
+        # Create a random sparse adjacency matrix
+        adj = sp.random(n_nodes, n_nodes, density=0.1, format='csr')
+        adj = adj + adj.T  # Make symmetric
+        adj.data = np.ones_like(adj.data)  # Binary edges
+        adjacency_sequence.append(adj)
+    
+    # Create experiment instance
+    experiment = TemporalLinkPredictionExperiment(
+        encoding_type="laplacian",
+        n_eigenvectors=16,
+        hidden_dim=32,
+        epochs=50,  # Small number for demo
+        learning_rate=1e-3
+    )
+    
+    # Train and save automatically
+    save_path = "example_temporal_gcn_model"
+    results = experiment.run_comprehensive_experiment(
+        adjacency_sequence, 
+        verbose=True, 
+        include_static=False,
+        save_path=save_path,
+        save_data=True  # Save the data too
+    )
+    
+    print(f"\nModel saved successfully to: {save_path}")
+    
+    # Example 2: Loading and making predictions
+    print("\n2. Loading the saved model and making predictions...")
+    
+    # Create some new test data
+    new_adjacency_sequence = []
+    for t in range(5):  # Shorter test sequence
+        adj = sp.random(n_nodes, n_nodes, density=0.12, format='csr')
+        adj = adj + adj.T
+        adj.data = np.ones_like(adj.data)
+        new_adjacency_sequence.append(adj)
+    
+    # Make predictions using the saved model
+    prediction_results = TemporalLinkPredictionExperiment.predict_from_saved_model(
+        save_path, new_adjacency_sequence, verbose=True
+    )
+    
+    print(f"\nPredictions completed on {len(new_adjacency_sequence)} timesteps")
+    print(f"Average AUC: {prediction_results['summary_stats']['mean_auc']:.4f}")
+    
+    # Example 3: Loading just the model for custom inference
+    print("\n3. Loading just the model weights for custom use...")
+    
+    model, model_config, experiment_config = TemporalLinkPredictionExperiment.load_trained_model(save_path)
+    print(f"Loaded model with config: {model_config}")
+    
+    return results, prediction_results
+
+
 if __name__ == "__main__":
     # Run the comprehensive experiment
     # results = run_full_comparison_experiment()
     
     # Run tnetwork benchmark experiment
-    tnetwork_results = run_tnetwork_benchmark_experiment()
+    # tnetwork_results = run_tnetwork_benchmark_experiment()
+    
+    # Run the example showing save/load functionality
+    example_results = example_save_load_usage()

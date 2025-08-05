@@ -521,7 +521,7 @@ def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_c
 
     types = ['simple', 'signed', 'directed', 'overlapping', 'multiview', 'cocommunity', 'hierarchical']
     algorithms = {
-        'simple': ['nsc', 'smm', 'bhc'],
+        'simple': ['nsc', 'smm', 'bhc', 'usc'],
         'signed': ['srsc', 'gmsc', 'spmsc'],
         'overlapping': ['osc', 'csc'],
         'directed': ['ddsc', 'bsc', 'rwsc'],
@@ -725,6 +725,32 @@ class BHC(Simple):
         d = sadj.sum(axis=1).A1  
         H = (r**2 - 1) * sparse.eye(n) - r * sadj + sparse.diags(d)  
         return H
+
+
+class USC(Simple):
+    """Unnormalized Spectral Clustering using the unnormalized graph Laplacian L = D - A."""
+    
+    def make_clustering_matrix(self, sadj):
+        pass  # we override the full make_modeled_clustering_matrices method using unnormalized_laplacian
+    
+    @staticmethod
+    def unnormalized_laplacian(A):
+        """
+        Compute the unnormalized graph Laplacian L = D - A.
+        
+        Args:
+            A: Adjacency matrix (sparse)
+            
+        Returns:
+            L: Unnormalized Laplacian matrix (sparse)
+        """
+        degrees = A.sum(axis=1).A1
+        D = sparse.diags(degrees)
+        L = D - A
+        return L
+    
+    def make_modeled_clustering_matrices(self):
+        self.modeled_clustering_matrices = [USC.unnormalized_laplacian(sadj) for sadj in self.sadj_list]
     
     
 def signed_power_mean_laplacian(A_pos, A_neg, p, epsilon=1e-6):
