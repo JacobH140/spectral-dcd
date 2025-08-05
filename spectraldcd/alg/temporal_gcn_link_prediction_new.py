@@ -960,8 +960,8 @@ def run_full_comparison_experiment():
     # Generate dynamic SBM data
     
     d = 100
-    k = 2
-    pin = [0.3, 0.3]
+    k = 4
+    pin = [0.4]*k
     pout = 0.2
     p_switch = 0.01
     n_sims =1
@@ -969,12 +969,12 @@ def run_full_comparison_experiment():
     T = 50
     
     # Learning hyperparameters
-    n_eigenvectors = 32
-    hidden_dim = 64
+    n_eigenvectors = 8
+    hidden_dim = 32
     num_layers = 2
-    dropout = 0.3
+    dropout = 0.4
     input_dropout = 0.1  # Dropout for first layer (set to None to use same as dropout)
-    learning_rate = 0.01
+    learning_rate = 1e-4
     weight_decay = 1e-5  # L2 regularization strength
     epochs = 500
     include_static = False  # Set to True to include static baselines (takes much longer)
