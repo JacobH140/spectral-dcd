@@ -14,6 +14,7 @@ import seaborn as sns
 from typing import Tuple, Optional, List, Union, Dict
 import pandas as pd
 from collections import defaultdict
+import networkx as nx
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -815,6 +816,152 @@ def run_full_comparison_experiment():
     return results
 
 
+def run_tnetwork_benchmark_experiment():
+    """Run GCN experiments on tnetwork benchmark data."""
+    try:
+        import tnetwork as tn
+    except ImportError:
+        print("Error: tnetwork library not found. Please install with: pip install tnetwork")
+        return None
+    
+    # Helper functions from demo.ipynb
+    def tn_format_int_into_node_key(num):
+        return f'n_t_{num // 10000:0>4}_{num % 10000:0>4}'
+
+    def tn_benchmark_generated_communities_to_labels_list(generated_network, generated_communities, num_nodes):
+        T = generated_network.end()
+        generated_communities_snapshots = generated_communities.to_DynCommunitiesSN(slices=1)
+        node_keys = [tn_format_int_into_node_key(i) for i in range(num_nodes)]
+        labels_list = []
+
+        for t in range(T):
+            affiliations = generated_communities_snapshots.snapshot_affiliations(t=t)
+            affiliations_list_indexed_by_node = []
+            for node_key in node_keys:
+                if node_key in affiliations:
+                    affiliations_list_indexed_by_node.append(affiliations[node_key])
+                else:
+                    affiliations_list_indexed_by_node.append(None)
+            labels = [int(list(affiliations_list_indexed_by_node[i])[0]) if affiliations_list_indexed_by_node[i] is not None else None for i in range(num_nodes)]
+            labels_list.append(labels)
+        
+        return labels_list, node_keys
+
+    def get_adjacencies_and_truths(tn_dynamic_network, tn_communities):
+        T = tn_dynamic_network.end()
+        tn_dynamic_network_SN = tn_dynamic_network.to_DynGraphSN(slices=1)
+        comms_snapshots = tn_communities.to_DynCommunitiesSN(slices=1)
+        
+        sorted_node_ids = sorted(tn_dynamic_network_SN.graph_at_time(0).nodes())
+        
+        adjacency_matrices = [tn_dynamic_network_SN.graph_at_time(t) for t in range(T)]
+        adjacency_matrices = [sp.csr_matrix(nx.adjacency_matrix(adj, nodelist=sorted_node_ids)) for adj in adjacency_matrices]
+        labels_list, _ = tn_benchmark_generated_communities_to_labels_list(tn_dynamic_network, tn_communities, adjacency_matrices[0].shape[0])
+
+        return adjacency_matrices, labels_list, comms_snapshots
+
+    def eight_comms_merge_into_six(show=False, noise=0.7):
+        """Create tnetwork benchmark with 8 communities merging into 6."""
+        my_scenario = tn.ComScenario(random_noise=noise)
+        size = 15
+        com0, com1, com2, com3, com4, com5, com6, com7 = my_scenario.INITIALIZE([size]*8, ["0","1", "2", "3", "4", "5", "6", "7"])
+        my_scenario.CONTINUE(com7, delay=1)
+        merge1 = my_scenario.MERGE([com0, com1], "0", delay=35)
+        merge5 = my_scenario.MERGE([com5, com6], "5", delay=35)
+        
+        my_scenario.CONTINUE(merge1, delay=40)
+        my_scenario.CONTINUE(merge5, delay=40)
+        generated_network, generated_communities = my_scenario.run()
+
+        adjacency_matrices, labels_list, comms_snapshots = get_adjacencies_and_truths(generated_network, generated_communities)
+        
+        return adjacency_matrices, labels_list, comms_snapshots
+    
+    print("=" * 60)
+    print("TNETWORK BENCHMARK EXPERIMENT")
+    print("=" * 60)
+    
+    # Generate tnetwork benchmark data
+    print("Generating tnetwork benchmark data (8 communities merging into 6)...")
+    adjacency_sequence, labels_true, _ = eight_comms_merge_into_six(show=False)
+    
+    print(f"Generated {len(adjacency_sequence)} timesteps with {adjacency_sequence[0].shape[0]} nodes")
+    
+    # Run experiments with all three encoding methods
+    results = {}
+    
+    for encoding_type in ["laplacian", "identity", "none"]:
+        print(f"\n{'-'*50}")
+        print(f"Running experiment with {encoding_type.upper()} encoding")
+        print(f"{'-'*50}")
+        
+        experiment = TemporalLinkPredictionExperiment(
+            encoding_type=encoding_type,
+            n_eigenvectors=32,
+            hidden_dim=64,
+            num_layers=2,
+            dropout=0.3,
+            learning_rate=0.01,
+            epochs=100  # Reduced for benchmark
+        )
+        
+        experiment_results = experiment.run_comprehensive_experiment(
+            adjacency_sequence, test_ratio=0.2, verbose=True
+        )
+        
+        results[encoding_type] = experiment_results
+        
+        # Plot results for this encoding
+        experiment.plot_results(experiment_results, 
+                              save_path=f"tnetwork_gcn_comparison_{encoding_type}.png")
+    
+    # Summary comparison
+    print(f"\n{'='*70}")
+    print("TNETWORK BENCHMARK RESULTS SUMMARY")
+    print(f"{'='*70}")
+    
+    # Collect all results
+    all_results = {}
+    for encoding_type in ["laplacian", "identity", "none"]:
+        all_results[encoding_type] = {}
+        for method in ['temporal', 'static']:
+            df = pd.DataFrame(results[encoding_type][method]['results'])
+            all_results[encoding_type][method] = df[['auc', 'ap', 'accuracy']].mean()
+    
+    # Show comparison for each encoding type
+    for encoding_type in ["laplacian", "identity", "none"]:
+        print(f"\n{encoding_type.upper()} ENCODING:")
+        print(f"{'-'*30}")
+        temporal_results = all_results[encoding_type]['temporal']
+        static_results = all_results[encoding_type]['static']
+        
+        print(f"  Temporal GCN: AUC={temporal_results['auc']:.4f}, AP={temporal_results['ap']:.4f}, Acc={temporal_results['accuracy']:.4f}")
+        print(f"  Static GCN:   AUC={static_results['auc']:.4f}, AP={static_results['ap']:.4f}, Acc={static_results['accuracy']:.4f}")
+        print(f"  Improvement:  AUC={temporal_results['auc']-static_results['auc']:+.4f}, AP={temporal_results['ap']-static_results['ap']:+.4f}, Acc={temporal_results['accuracy']-static_results['accuracy']:+.4f}")
+    
+    # Final summary table
+    print(f"\n{'='*60}")
+    print("TNETWORK BENCHMARK SUMMARY TABLE")
+    print(f"{'='*60}")
+    print(f"{'Encoding':<12} {'Method':<8} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
+    print(f"{'-'*50}")
+    for encoding_type in ["laplacian", "identity", "none"]:
+        for method in ['temporal', 'static']:
+            results_data = all_results[encoding_type][method]
+            print(f"{encoding_type.title():<12} {method.title():<8} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
+        print(f"{'-'*50}")
+    
+    print(f"\nBenchmark dataset characteristics:")
+    print(f"  Nodes: {adjacency_sequence[0].shape[0]}")
+    print(f"  Timesteps: {len(adjacency_sequence)}")
+    print(f"  Dynamics: 8 communities merge into 6 over time")
+    
+    return results
+
+
 if __name__ == "__main__":
     # Run the comprehensive experiment
-    results = run_full_comparison_experiment()
+    # results = run_full_comparison_experiment()
+    
+    # Run tnetwork benchmark experiment
+    tnetwork_results = run_tnetwork_benchmark_experiment()

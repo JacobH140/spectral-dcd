@@ -1051,6 +1051,177 @@ def run_full_comparison_experiment():
     return results
 
 
+def run_tnetwork_benchmark_experiment():
+    """Run GCN experiments on tnetwork benchmark data."""
+    try:
+        import tnetwork as tn
+        import networkx as nx
+    except ImportError:
+        print("Error: tnetwork library not found. Please install with: pip install tnetwork")
+        return None
+    
+    # Helper functions from demo.ipynb
+    def tn_format_int_into_node_key(num):
+        return f'n_t_{num // 10000:0>4}_{num % 10000:0>4}'
+
+    def tn_benchmark_generated_communities_to_labels_list(generated_network, generated_communities, num_nodes):
+        T = generated_network.end()
+        generated_communities_snapshots = generated_communities.to_DynCommunitiesSN(slices=1)
+        node_keys = [tn_format_int_into_node_key(i) for i in range(num_nodes)]
+        labels_list = []
+
+        for t in range(T):
+            affiliations = generated_communities_snapshots.snapshot_affiliations(t=t)
+            affiliations_list_indexed_by_node = []
+            for node_key in node_keys:
+                if node_key in affiliations:
+                    affiliations_list_indexed_by_node.append(affiliations[node_key])
+                else:
+                    affiliations_list_indexed_by_node.append(None)
+            labels = [int(list(affiliations_list_indexed_by_node[i])[0]) if affiliations_list_indexed_by_node[i] is not None else None for i in range(num_nodes)]
+            labels_list.append(labels)
+        
+        return labels_list, node_keys
+
+    def get_adjacencies_and_truths(tn_dynamic_network, tn_communities):
+        T = tn_dynamic_network.end()
+        tn_dynamic_network_SN = tn_dynamic_network.to_DynGraphSN(slices=1)
+        comms_snapshots = tn_communities.to_DynCommunitiesSN(slices=1)
+        
+        sorted_node_ids = sorted(tn_dynamic_network_SN.graph_at_time(0).nodes())
+        
+        adjacency_matrices = [tn_dynamic_network_SN.graph_at_time(t) for t in range(T)]
+        adjacency_matrices = [sp.csr_matrix(nx.adjacency_matrix(adj, nodelist=sorted_node_ids)) for adj in adjacency_matrices]
+        labels_list, _ = tn_benchmark_generated_communities_to_labels_list(tn_dynamic_network, tn_communities, adjacency_matrices[0].shape[0])
+
+        return adjacency_matrices, labels_list, comms_snapshots
+
+    def eight_comms_merge_into_six(show=False, noise=0.7):
+        """Create tnetwork benchmark with 8 communities merging into 6."""
+        my_scenario = tn.ComScenario(random_noise=noise)
+        size = 15
+        com0, com1, com2, com3, com4, com5, com6, com7 = my_scenario.INITIALIZE([size]*8, ["0","1", "2", "3", "4", "5", "6", "7"])
+        my_scenario.CONTINUE(com7, delay=1)
+        merge1 = my_scenario.MERGE([com0, com1], "0", delay=35)
+        merge5 = my_scenario.MERGE([com5, com6], "5", delay=35)
+        
+        my_scenario.CONTINUE(merge1, delay=40)
+        my_scenario.CONTINUE(merge5, delay=40)
+        generated_network, generated_communities = my_scenario.run()
+
+        adjacency_matrices, labels_list, comms_snapshots = get_adjacencies_and_truths(generated_network, generated_communities)
+        
+        return adjacency_matrices, labels_list, comms_snapshots
+    
+    print("=" * 60)
+    print("TNETWORK BENCHMARK EXPERIMENT")
+    print("=" * 60)
+    
+    # Generate tnetwork benchmark data
+    print("Generating tnetwork benchmark data (8 communities merging into 6)...")
+    adjacency_sequence, labels_true, _ = eight_comms_merge_into_six(show=False)
+    
+    print(f"Generated {len(adjacency_sequence)} timesteps with {adjacency_sequence[0].shape[0]} nodes")
+    
+    # Run experiments with both encoding methods and canonicalization options
+    results = {}
+    
+    # Parameters for benchmark
+    n_eigenvectors = 8
+    hidden_dim = 32
+    num_layers = 2
+    dropout = 0.4
+    input_dropout = 0.1
+    learning_rate = 1e-4
+    weight_decay = 1e-4
+    epochs = 200
+    
+    print(f"Experiment parameters:")
+    print(f"  n_eigenvectors: {n_eigenvectors}")
+    print(f"  hidden_dim: {hidden_dim}")
+    print(f"  num_layers: {num_layers}")
+    print(f"  dropout: {dropout}")
+    print(f"  input_dropout: {input_dropout}")
+    print(f"  learning_rate: {learning_rate}")
+    print(f"  weight_decay: {weight_decay}")
+    print(f"  epochs: {epochs}")
+    
+    for encoding_type in ["laplacian", "geodesic"]:
+        for canonicalize in [False, True]:
+            print(f"\n{'-'*50}")
+            print(f"Running experiment with {encoding_type.upper()} encoding and canonicalization={canonicalize}")
+            print(f"{'-'*50}")
+            
+            experiment = TemporalLinkPredictionExperiment(
+                encoding_type=encoding_type,
+                n_eigenvectors=n_eigenvectors,
+                canonicalize_sign=canonicalize,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                input_dropout=input_dropout,
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+                epochs=epochs
+            )
+            
+            experiment_results = experiment.run_comprehensive_experiment(
+                adjacency_sequence, verbose=True, include_static=False  # Skip static for faster benchmark
+            )
+            
+            key = f"{encoding_type}_{'canon' if canonicalize else 'nocanon'}"
+            results[key] = experiment_results
+            
+            # Plot results for this configuration
+            experiment.plot_results(experiment_results, 
+                                    save_path=f"tnetwork_gcn_{encoding_type}_{'canon' if canonicalize else 'nocanon'}.png")
+    
+    # Summary comparison
+    print(f"\n{'='*70}")
+    print("TNETWORK BENCHMARK RESULTS SUMMARY")
+    print(f"{'='*70}")
+    
+    # Create summary table
+    summary_data = []
+    for key, res in results.items():
+        encoding, canon_str = key.split('_')
+        canon = "Canon" if canon_str == "canon" else "No Canon"
+        
+        temporal_mean = pd.DataFrame(res['temporal']['results'])[['auc', 'ap', 'accuracy']].mean()
+        summary_data.append({
+            "Encoding": encoding.title(),
+            "Canonicalization": canon,
+            "AUC": f"{temporal_mean['auc']:.4f}",
+            "AP": f"{temporal_mean['ap']:.4f}",
+            "Accuracy": f"{temporal_mean['accuracy']:.4f}"
+        })
+
+    summary_df = pd.DataFrame(summary_data)
+    print(summary_df.to_string(index=False))
+    
+    # Show best performing configuration
+    best_auc = 0
+    best_config = ""
+    for key, res in results.items():
+        temporal_mean = pd.DataFrame(res['temporal']['results'])[['auc', 'ap', 'accuracy']].mean()
+        if temporal_mean['auc'] > best_auc:
+            best_auc = temporal_mean['auc']
+            best_config = key
+    
+    print(f"\nBest performing configuration: {best_config} (AUC: {best_auc:.4f})")
+    
+    print(f"\nBenchmark dataset characteristics:")
+    print(f"  Nodes: {adjacency_sequence[0].shape[0]}")
+    print(f"  Timesteps: {len(adjacency_sequence)}")
+    print(f"  Dynamics: 8 communities merge into 6 over time")
+    print(f"  Community size: 15 nodes each")
+    
+    return results
+
+
 if __name__ == "__main__":
     # Run the comprehensive experiment
-    results = run_full_comparison_experiment()
+    # results = run_full_comparison_experiment()
+    
+    # Run tnetwork benchmark experiment
+    tnetwork_results = run_tnetwork_benchmark_experiment()
