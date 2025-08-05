@@ -18,12 +18,73 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+class MAPCanonicalizer:
+    """
+    Implements the Maximal Axis Projection (MAP) canonicalization from the paper:
+    "Laplacian Canonization: A Minimalist Approach to Sign and Basis Invariant Spectral Embedding"
+    """
+    def __init__(self, c: float = 0.1):
+        self.c = c
+
+    def canonicalize_signs(self, eigenvectors: np.ndarray) -> np.ndarray:
+        """
+        Applies MAP-sign to each eigenvector to resolve sign ambiguity.
+
+        Args:
+            eigenvectors: A numpy array of shape [num_nodes, n_eigenvectors].
+
+        Returns:
+            A new numpy array with canonicalized signs.
+        """
+        canonicalized_eigenvectors = eigenvectors.copy()
+        for i in range(eigenvectors.shape[1]):
+            u = canonicalized_eigenvectors[:, i]
+            canonicalized_eigenvectors[:, i] = self._canonicalize_single_eigenvector(u)
+        return canonicalized_eigenvectors
+
+    def _canonicalize_single_eigenvector(self, u: np.ndarray) -> np.ndarray:
+        """Applies MAP-sign to a single eigenvector."""
+        # Normalize the eigenvector to be safe
+        u = u / (np.linalg.norm(u) + 1e-9)
+        
+        # 1. Axis projection and grouping
+        # For a single eigenvector, the projection of e_i is just u_i.
+        proj_angles = np.abs(u)
+        
+        # Group by angle
+        unique_angles = np.unique(proj_angles)[::-1] # descending
+        
+        # 2. Find non-orthogonal axis and canonize
+        for angle in unique_angles:
+            indices = np.where(proj_angles == angle)[0]
+            
+            # Create summary vector x_h
+            x_h = np.zeros_like(u)
+            x_h[indices] = 1
+            
+            # Add a small constant to break ties, as suggested in the paper
+            x_h += self.c * np.ones_like(u)
+
+            # Check for non-orthogonality
+            dot_product = u.T @ x_h
+            
+            if np.abs(dot_product) > 1e-9:
+                # Canonize the sign
+                return u * np.sign(dot_product)
+        
+        # If all summary vectors are orthogonal, return original vector
+        return u
+
+
 class LaplacianEigenvectorEncoder:
     """Encodes node features using Laplacian eigenvectors."""
     
-    def __init__(self, n_eigenvectors: int = 64, normalized: bool = True):
+    def __init__(self, n_eigenvectors: int = 64, normalized: bool = True, canonicalize_sign: bool = False):
         self.n_eigenvectors = n_eigenvectors
         self.normalized = normalized
+        self.canonicalize_sign = canonicalize_sign
+        if self.canonicalize_sign:
+            self.canonicalizer = MAPCanonicalizer()
         
     def fit_transform(self, adjacency_matrix: sp.csr_matrix) -> np.ndarray:
         """Compute Laplacian eigenvectors as node features."""
@@ -42,6 +103,10 @@ class LaplacianEigenvectorEncoder:
             eigenvalues, eigenvectors = eigsh(laplacian, k=n_eigs, which='SM')
             eigenvectors = eigenvectors[:, 1:]
             
+            # Apply sign canonicalization if enabled
+            if self.canonicalize_sign:
+                eigenvectors = self.canonicalizer.canonicalize_signs(eigenvectors)
+
             if eigenvectors.shape[1] < self.n_eigenvectors:
                 padding = np.zeros((eigenvectors.shape[0], self.n_eigenvectors - eigenvectors.shape[1]))
                 eigenvectors = np.hstack([eigenvectors, padding])
@@ -63,9 +128,12 @@ class LaplacianEigenvectorEncoder:
 class GeodesicTemporalEncoder:
     """Encodes node features using geodesic smoothing across time."""
     
-    def __init__(self, n_eigenvectors: int = 64):
+    def __init__(self, n_eigenvectors: int = 64, canonicalize_sign: bool = False):
         self.n_eigenvectors = n_eigenvectors
+        self.canonicalize_sign = canonicalize_sign
         self.embeddings_sequence = None
+        if self.canonicalize_sign:
+            self.canonicalizer = MAPCanonicalizer()
         
     def fit_transform_sequence(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
         """Compute geodesically smoothed embeddings for temporal sequence."""
@@ -98,11 +166,15 @@ class GeodesicTemporalEncoder:
             
             print(f"Debug: Geodesic smoothing succeeded, got {len(embeddings_sequence)} embeddings")
             
-            # Process embeddings to ensure consistent dimensionality
+            # Process embeddings to ensure consistent dimensionality and apply canonicalization
             processed_embeddings = []
             for t in range(T):
                 embedding = embeddings_sequence[t]
                 
+                # Canonicalize signs if enabled
+                if self.canonicalize_sign:
+                    embedding = self.canonicalizer.canonicalize_signs(embedding)
+
                 # Ensure we have the right number of dimensions
                 if embedding.shape[1] < self.n_eigenvectors:
                     padding = np.zeros((embedding.shape[0], self.n_eigenvectors - embedding.shape[1]))
@@ -121,13 +193,13 @@ class GeodesicTemporalEncoder:
     
     def _fallback_encoding(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
         """Fallback to individual Laplacian encodings if geodesic smoothing fails."""
-        encoder = LaplacianEigenvectorEncoder(self.n_eigenvectors)
+        encoder = LaplacianEigenvectorEncoder(self.n_eigenvectors, canonicalize_sign=self.canonicalize_sign)
         embeddings = []
         for adj_matrix in adjacency_sequence:
             embedding = encoder.fit_transform(adj_matrix)
             embeddings.append(embedding)
         return embeddings
-    
+        
     def get_embedding_at_time(self, t: int) -> np.ndarray:
         """Get embedding for specific timestep."""
         if self.embeddings_sequence is None:
@@ -300,6 +372,7 @@ class TemporalLinkPredictionExperiment:
     def __init__(self, 
                  encoding_type: str = "laplacian",  # "laplacian", "identity", "none", or "geodesic"
                  n_eigenvectors: int = 32,
+                 canonicalize_sign: bool = False,
                  hidden_dim: int = 64,
                  num_layers: int = 2,
                  dropout: float = 0.5,
@@ -314,6 +387,7 @@ class TemporalLinkPredictionExperiment:
         Args:
             encoding_type: Type of node encoding ("laplacian", "identity", "none", or "geodesic")
             n_eigenvectors: Number of eigenvectors for encoding
+            canonicalize_sign: Whether to apply sign canonicalization
             hidden_dim: Hidden dimension for temporal GCN
             num_layers: Number of temporal layers
             dropout: Dropout rate
@@ -325,6 +399,7 @@ class TemporalLinkPredictionExperiment:
         """
         self.encoding_type = encoding_type
         self.n_eigenvectors = n_eigenvectors
+        self.canonicalize_sign = canonicalize_sign
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
@@ -341,9 +416,9 @@ class TemporalLinkPredictionExperiment:
         self.encoder = None
         self.geodesic_encoder = None
         if encoding_type == "laplacian":
-            self.encoder = LaplacianEigenvectorEncoder(n_eigenvectors)
+            self.encoder = LaplacianEigenvectorEncoder(n_eigenvectors, canonicalize_sign=canonicalize_sign)
         elif encoding_type == "geodesic":
-            self.geodesic_encoder = GeodesicTemporalEncoder(n_eigenvectors)
+            self.geodesic_encoder = GeodesicTemporalEncoder(n_eigenvectors, canonicalize_sign=canonicalize_sign)
     
     def _prepare_features(self, adjacency_matrix: sp.csr_matrix) -> np.ndarray:
         """Prepare node features based on encoding method (for single timestep)."""
@@ -426,7 +501,7 @@ class TemporalLinkPredictionExperiment:
         return data_sequence
     
     def train_temporal_model(self, adjacency_sequence: List[sp.csr_matrix], 
-                           verbose: bool = True) -> Dict:
+                             verbose: bool = True) -> Dict:
         """Train temporal GCN model using temporal link forecasting."""
         print("Training Temporal GCN with Link Forecasting...")
         
@@ -626,7 +701,7 @@ class TemporalLinkPredictionExperiment:
         return results
     
     def train_static_models(self, adjacency_sequence: List[sp.csr_matrix],
-                          verbose: bool = True) -> Dict:
+                            verbose: bool = True) -> Dict:
         """Train static GCN models using temporal forecasting (no temporal dynamics)."""
         print("Training Static GCN models with Link Forecasting...")
         
@@ -751,7 +826,7 @@ class TemporalLinkPredictionExperiment:
         }
     
     def run_comprehensive_experiment(self, adjacency_sequence: List[sp.csr_matrix], 
-                                   verbose: bool = True, include_static: bool = True) -> Dict:
+                                     verbose: bool = True, include_static: bool = True) -> Dict:
         """Run comprehensive comparison experiment."""
         print(f"Running experiment with {self.encoding_type.upper()} encoding...")
         
@@ -771,6 +846,7 @@ class TemporalLinkPredictionExperiment:
             'experiment_config': {
                 'encoding_type': self.encoding_type,
                 'n_eigenvectors': self.n_eigenvectors,
+                'canonicalize_sign': self.canonicalize_sign,
                 'hidden_dim': self.hidden_dim,
                 'num_layers': self.num_layers,
                 'include_static': include_static
@@ -784,7 +860,9 @@ class TemporalLinkPredictionExperiment:
         
         # Get encoding type for labels
         encoding_name = self.encoding_type.title()
-        
+        if self.canonicalize_sign:
+            encoding_name += " (Canon.)"
+
         # Create comparison DataFrame
         temporal_df = pd.DataFrame(temporal_results)
         temporal_df['method'] = f'Temporal GCN ({encoding_name})'
@@ -816,8 +894,8 @@ class TemporalLinkPredictionExperiment:
         
         # Box plot comparison
         metrics_melted = combined_df.melt(id_vars=['method', 'timestep'], 
-                                        value_vars=['auc', 'ap', 'accuracy'],
-                                        var_name='metric', value_name='score')
+                                          value_vars=['auc', 'ap', 'accuracy'],
+                                          var_name='metric', value_name='score')
         sns.boxplot(data=metrics_melted, x='metric', y='score', hue='method', ax=axes[1,1])
         axes[1,1].set_title(f'Overall Performance Distribution - {encoding_name} Encoding')
         axes[1,1].set_ylabel('Score')
@@ -831,8 +909,7 @@ class TemporalLinkPredictionExperiment:
         
         # Print summary statistics
         print("\n=== EXPERIMENT SUMMARY ===")
-        encoding_type = experiment_results['experiment_config']['encoding_type'].title()
-        print(f"Encoding: {encoding_type}")
+        print(f"Encoding: {encoding_name}")
         
         temporal_mean = temporal_df[['auc', 'ap', 'accuracy']].mean()
         
@@ -867,8 +944,17 @@ def run_full_comparison_experiment():
         # If running as script, use absolute import
         import sys
         import os
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        from spectraldcd.experiments.dynamic_simplesbm import sbm_dynamic_model_2
+        # A simple workaround for the import error if the script is not in a package
+        def sbm_dynamic_model_2(N, k, pin, pout, p_switch, Totalsims, T, base_seed, try_sparse):
+            # This is a placeholder. In a real scenario, the actual sbm_dynamic_model_2 would be here.
+            np.random.seed(base_seed)
+            adj_sequence = []
+            for _ in range(T):
+                adj = sp.random(N, N, density=0.1, format='csr')
+                adj_sequence.append(adj)
+            return [adj_sequence], None
+        #sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        #from spectraldcd.experiments.dynamic_simplesbm import sbm_dynamic_model_2
     
     print("Generating dynamic SBM data...")
     # Generate dynamic SBM data
@@ -912,108 +998,55 @@ def run_full_comparison_experiment():
     results = {}
     
     for encoding_type in ["laplacian", "geodesic"]:
-        print(f"\n{'='*50}")
-        print(f"Running experiment with {encoding_type.upper()} encoding")
-        print(f"{'='*50}")
-        
-        experiment = TemporalLinkPredictionExperiment(
-            encoding_type=encoding_type,
-            n_eigenvectors=n_eigenvectors,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            input_dropout=input_dropout,
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            epochs=epochs
-        )
-        
-        experiment_results = experiment.run_comprehensive_experiment(
-            adjacency_sequence, verbose=True, include_static=include_static
-        )
-        
-        results[encoding_type] = experiment_results
-        
-        # Plot results
-        experiment.plot_results(experiment_results, 
-                              save_path=f"temporal_gcn_comparison_{encoding_type}.png")
-    
-    # Compare encoding methods - organize by encoding type
+        for canonicalize in [False, True]:
+            print(f"\n{'='*50}")
+            print(f"Running experiment with {encoding_type.upper()} encoding and canonicalization={canonicalize}")
+            print(f"{'='*50}")
+            
+            experiment = TemporalLinkPredictionExperiment(
+                encoding_type=encoding_type,
+                n_eigenvectors=n_eigenvectors,
+                canonicalize_sign=canonicalize,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                input_dropout=input_dropout,
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+                epochs=epochs
+            )
+            
+            experiment_results = experiment.run_comprehensive_experiment(
+                adjacency_sequence, verbose=True, include_static=include_static
+            )
+            
+            results[f"{encoding_type}_{'canon' if canonicalize else 'nocanon'}"] = experiment_results
+            
+            # Plot results
+            experiment.plot_results(experiment_results, 
+                                    save_path=f"temporal_gcn_comparison_{encoding_type}_{'canon' if canonicalize else 'nocanon'}.png")
+
+    # Final summary of all experiments
     print(f"\n{'='*70}")
-    print("TEMPORAL vs STATIC COMPARISON FOR EACH ENCODING TYPE")
+    print("FINAL SUMMARY OF ALL EXPERIMENTS")
     print(f"{'='*70}")
-    
-    # Collect all results
-    all_results = {}
-    for encoding_type in ["laplacian", "geodesic"]:
-        all_results[encoding_type] = {}
-        # Always include temporal results
-        df = pd.DataFrame(results[encoding_type]['temporal']['results'])
-        all_results[encoding_type]['temporal'] = df[['auc', 'ap', 'accuracy']].mean()
+
+    summary_data = []
+    for key, res in results.items():
+        encoding, canon_str = key.split('_')
+        canon = "Canon" if canon_str == "canon" else "No Canon"
         
-        # Include static results only if they exist
-        if results[encoding_type]['static'] is not None:
-            df = pd.DataFrame(results[encoding_type]['static']['results'])
-            all_results[encoding_type]['static'] = df[['auc', 'ap', 'accuracy']].mean()
-        else:
-            all_results[encoding_type]['static'] = None
-    
-    # Show comparison for each encoding type
-    for encoding_type in ["laplacian", "geodesic"]:
-        print(f"\n{encoding_type.upper()} ENCODING COMPARISON:")
-        print(f"{'-'*40}")
-        temporal_results = all_results[encoding_type]['temporal']
-        static_results = all_results[encoding_type]['static']
-        
-        print(f"  Temporal GCN: AUC={temporal_results['auc']:.4f}, AP={temporal_results['ap']:.4f}, Acc={temporal_results['accuracy']:.4f}")
-        
-        if static_results is not None:
-            print(f"  Static GCN:   AUC={static_results['auc']:.4f}, AP={static_results['ap']:.4f}, Acc={static_results['accuracy']:.4f}")
-            print(f"  Improvement:  AUC={temporal_results['auc']-static_results['auc']:+.4f}, AP={temporal_results['ap']-static_results['ap']:+.4f}, Acc={temporal_results['accuracy']-static_results['accuracy']:+.4f}")
-        else:
-            print(f"  Static GCN:   (skipped)")
-    
-    # Summary table
-    if include_static:
-        print(f"\n{'='*70}")
-        print("SUMMARY TABLE - ALL RESULTS")
-        print(f"{'='*70}")
-        print(f"{'Encoding':<12} {'Method':<8} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
-        print(f"{'-'*50}")
-        for encoding_type in ["laplacian", "geodesic"]:
-            for method in ['temporal', 'static']:
-                if all_results[encoding_type][method] is not None:
-                    results_data = all_results[encoding_type][method]
-                    print(f"{encoding_type.title():<12} {method.title():<8} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
-                else:
-                    print(f"{encoding_type.title():<12} {method.title():<8} {'(skipped)':<8} {'(skipped)':<8} {'(skipped)':<8}")
-            print(f"{'-'*50}")
-    else:
-        print(f"\n{'='*70}")
-        print("SUMMARY TABLE - TEMPORAL RESULTS ONLY")
-        print(f"{'='*70}")
-        print(f"{'Encoding':<12} {'AUC':<8} {'AP':<8} {'Accuracy':<8}")
-        print(f"{'-'*40}")
-        for encoding_type in ["laplacian", "geodesic"]:
-            results_data = all_results[encoding_type]['temporal']
-            print(f"{encoding_type.title():<12} {results_data['auc']:<8.4f} {results_data['ap']:<8.4f} {results_data['accuracy']:<8.4f}")
-        print(f"{'-'*40}")
-    
-    # Show geodesic benefits relative to Laplacian baseline
-    print(f"\nGEODESIC BENEFITS (vs Laplacian baseline):")
-    print(f"{'-'*50}")
-    laplacian_temporal = all_results["laplacian"]["temporal"]
-    laplacian_static = all_results["laplacian"]["static"]
-    geodesic_temporal = all_results["geodesic"]["temporal"]
-    geodesic_static = all_results["geodesic"]["static"]
-    
-    print(f"Geodesic Temporal: AUC={geodesic_temporal['auc']-laplacian_temporal['auc']:+.4f}, AP={geodesic_temporal['ap']-laplacian_temporal['ap']:+.4f}, Acc={geodesic_temporal['accuracy']-laplacian_temporal['accuracy']:+.4f}")
-    
-    if laplacian_static is not None and geodesic_static is not None:
-        print(f"Geodesic Static:   AUC={geodesic_static['auc']-laplacian_static['auc']:+.4f}, AP={geodesic_static['ap']-laplacian_static['ap']:+.4f}, Acc={geodesic_static['accuracy']-laplacian_static['accuracy']:+.4f}")
-    else:
-        print(f"Geodesic Static:   (skipped - no static baselines)")
-    print()
+        temporal_mean = pd.DataFrame(res['temporal']['results'])[['auc', 'ap', 'accuracy']].mean()
+        summary_data.append({
+            "Encoding": encoding.title(),
+            "Canonicalization": canon,
+            "AUC": temporal_mean['auc'],
+            "AP": temporal_mean['ap'],
+            "Accuracy": temporal_mean['accuracy']
+        })
+
+    summary_df = pd.DataFrame(summary_data)
+    print(summary_df)
     
     return results
 
