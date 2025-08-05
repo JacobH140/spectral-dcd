@@ -1521,7 +1521,7 @@ def run_tnetwork_benchmark_experiment():
     input_dropout = 0.1
     learning_rate = 5e-4
     weight_decay = 1e-4
-    epochs = 200
+    epochs = 2000
     
     print(f"Experiment parameters:")
     print(f"  n_eigenvectors: {n_eigenvectors}")
@@ -1535,8 +1535,12 @@ def run_tnetwork_benchmark_experiment():
     
     for encoding_type in ["laplacian", "geodesic"]:
         for canonicalize in [False]:
+            # Include static baselines only for laplacian encoding
+            include_static = (encoding_type == "laplacian")
+            static_info = "with static baselines" if include_static else "without static baselines"
+            
             print(f"\n{'-'*50}")
-            print(f"Running experiment with {encoding_type.upper()} encoding and canonicalization={canonicalize}")
+            print(f"Running experiment with {encoding_type.upper()} encoding and canonicalization={canonicalize} ({static_info})")
             print(f"{'-'*50}")
             
             experiment = TemporalLinkPredictionExperiment(
@@ -1553,7 +1557,7 @@ def run_tnetwork_benchmark_experiment():
             )
             
             experiment_results = experiment.run_comprehensive_experiment(
-                adjacency_sequence, verbose=True, include_static=False  # Skip static for faster benchmark
+                adjacency_sequence, verbose=True, include_static=include_static
             )
             
             key = f"{encoding_type}_{'canon' if canonicalize else 'nocanon'}"
