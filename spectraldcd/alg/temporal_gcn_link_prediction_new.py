@@ -83,6 +83,8 @@ class GeodesicTemporalEncoder:
             T = len(adjacency_sequence)
             num_nodes = adjacency_sequence[0].shape[0]
             
+            print(f"Debug: Starting geodesic smoothing with T={T}, num_nodes={num_nodes}, ke={self.n_eigenvectors}")
+            
             # Run spectral geodesic smoothing to get temporally smoothed embeddings
             embeddings_sequence = spectral_geodesic_smoothing(
                 adjacency_sequence, 
@@ -93,6 +95,8 @@ class GeodesicTemporalEncoder:
                 mode='simple-nsc',
                 return_geo_embeddings_only=True,
             )
+            
+            print(f"Debug: Geodesic smoothing succeeded, got {len(embeddings_sequence)} embeddings")
             
             # Process embeddings to ensure consistent dimensionality
             processed_embeddings = []
@@ -301,6 +305,7 @@ class TemporalLinkPredictionExperiment:
                  dropout: float = 0.5,
                  input_dropout: float = None,
                  learning_rate: float = 0.01,
+                 weight_decay: float = 0.0,
                  epochs: int = 200,
                  device: str = 'auto'):
         """
@@ -314,6 +319,7 @@ class TemporalLinkPredictionExperiment:
             dropout: Dropout rate
             input_dropout: Dropout rate for first layer (defaults to dropout if None)
             learning_rate: Learning rate
+            weight_decay: L2 regularization strength
             epochs: Training epochs
             device: Computing device
         """
@@ -324,6 +330,7 @@ class TemporalLinkPredictionExperiment:
         self.dropout = dropout
         self.input_dropout = input_dropout
         self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
         self.epochs = epochs
         
         if device == 'auto':
@@ -443,7 +450,7 @@ class TemporalLinkPredictionExperiment:
         if verbose:
             print(f"Model device: {next(model.parameters()).device}")
             print(f"Data device: {all_data[0].x.device}")
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         
         best_model_state = None
         best_val_auc = 0.0
@@ -646,7 +653,7 @@ class TemporalLinkPredictionExperiment:
             # Initialize model
             input_dim = current_data.x.shape[1]
             model = StaticGCNLinkPredictor(input_dim, [self.hidden_dim, self.hidden_dim//2], self.dropout).to(self.device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
             
             # Training loop - train on current snapshot to predict future snapshots
             model.train()
@@ -880,8 +887,9 @@ def run_full_comparison_experiment():
     hidden_dim = 64
     num_layers = 2
     dropout = 0.3
-    input_dropout = 0.5  # Dropout for first layer (set to None to use same as dropout)
+    input_dropout = 0.1  # Dropout for first layer (set to None to use same as dropout)
     learning_rate = 0.01
+    weight_decay = 1e-5  # L2 regularization strength
     epochs = 500
     include_static = False  # Set to True to include static baselines (takes much longer)
     
@@ -891,6 +899,7 @@ def run_full_comparison_experiment():
     
     print(f"Generated {len(adjacency_all[0])} snapshots with {adjacency_all[0][0].shape[0]} nodes each")
     print(f"SBM parameters: d={d}, k={k}, pin={pin}, pout={pout}, p_switch={p_switch}, n_sims={n_sims}, base_seed={base_seed}")
+    print(f"Learning parameters: n_eigenvectors={n_eigenvectors}, hidden_dim={hidden_dim}, num_layers={num_layers}, dropout={dropout}, input_dropout={input_dropout}, learning_rate={learning_rate}, weight_decay={weight_decay}, epochs={epochs}, include_static={include_static}")
     
     
     
@@ -915,6 +924,7 @@ def run_full_comparison_experiment():
             dropout=dropout,
             input_dropout=input_dropout,
             learning_rate=learning_rate,
+            weight_decay=weight_decay,
             epochs=epochs
         )
         
