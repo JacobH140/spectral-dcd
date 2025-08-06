@@ -17,7 +17,7 @@ from collections import defaultdict
 import warnings
 import pickle
 import os
-warnings.filterwarnings('ignore')
+
 
 
 class MAPCanonicalizer:
@@ -503,8 +503,23 @@ class TemporalLinkPredictionExperiment:
         return data_sequence
     
     def train_temporal_model(self, adjacency_sequence: List[sp.csr_matrix], 
-                             verbose: bool = True, auto_save_path: Optional[str] = None) -> Dict:
-        """Train temporal GCN model using temporal link forecasting."""
+                             verbose: bool = True, auto_save_path: Optional[str] = None,
+                             checkpoint_path: Optional[str] = None, checkpoint_freq: int = 50,
+                             resume_from_checkpoint: Optional[str] = None) -> Dict:
+        """
+        Train temporal GCN model using temporal link forecasting.
+        
+        Args:
+            adjacency_sequence: List of adjacency matrices for each timestep
+            verbose: Whether to print training progress
+            auto_save_path: Path to save final model (optional)
+            checkpoint_path: Directory to save training checkpoints (optional)
+            checkpoint_freq: Save checkpoint every N epochs (default: 50)
+            resume_from_checkpoint: Path to checkpoint file to resume training from (optional)
+        
+        Returns:
+            Dictionary with model, results, and training metadata
+        """
         print("Training Temporal GCN with Link Forecasting...")
         
         # Split snapshots temporally
@@ -531,10 +546,32 @@ class TemporalLinkPredictionExperiment:
         
         best_model_state = None
         best_val_auc = 0.0
+        start_epoch = 0
+        
+        # Set up checkpointing directory
+        if checkpoint_path is not None:
+            os.makedirs(checkpoint_path, exist_ok=True)
+            if verbose:
+                print(f"Checkpointing enabled: saving every {checkpoint_freq} epochs to {checkpoint_path}")
+        
+        # Resume from checkpoint if specified
+        if resume_from_checkpoint is not None and os.path.exists(resume_from_checkpoint):
+            if verbose:
+                print(f"Resuming training from checkpoint: {resume_from_checkpoint}")
+            checkpoint = torch.load(resume_from_checkpoint, map_location=self.device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch']
+            best_val_auc = checkpoint.get('best_val_auc', 0.0)
+            best_model_state = checkpoint.get('best_model_state', None)
+            if verbose:
+                print(f"Resumed from epoch {start_epoch}, best validation AUC: {best_val_auc:.4f}")
+        elif resume_from_checkpoint is not None:
+            print(f"Warning: Checkpoint file {resume_from_checkpoint} not found. Starting from scratch.")
         
         # Training loop
         model.train()
-        for epoch in range(self.epochs):
+        for epoch in range(start_epoch, self.epochs):
             optimizer.zero_grad()
             
             # Forward pass through entire training sequence to maintain temporal state
@@ -587,6 +624,38 @@ class TemporalLinkPredictionExperiment:
                     best_model_state = model.state_dict().copy()
                     if verbose:
                         print(f'New best validation AUC: {val_auc:.4f}')
+            
+            # Save checkpoint periodically
+            if checkpoint_path is not None and (epoch + 1) % checkpoint_freq == 0:
+                checkpoint_file = os.path.join(checkpoint_path, f"checkpoint_epoch_{epoch+1}.pth")
+                checkpoint_data = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_val_auc': best_val_auc,
+                    'best_model_state': best_model_state,
+                    'experiment_config': {
+                        'encoding_type': self.encoding_type,
+                        'n_eigenvectors': self.n_eigenvectors,
+                        'canonicalize_sign': self.canonicalize_sign,
+                        'hidden_dim': self.hidden_dim,
+                        'num_layers': self.num_layers,
+                        'dropout': self.dropout,
+                        'input_dropout': self.input_dropout,
+                        'learning_rate': self.learning_rate,
+                        'weight_decay': self.weight_decay,
+                        'epochs': self.epochs,
+                    },
+                    'train_snapshots': len(train_snapshots),
+                    'val_snapshots': len(val_snapshots),
+                    'test_snapshots': len(test_snapshots)
+                }
+                torch.save(checkpoint_data, checkpoint_file)
+                if verbose:
+                    print(f'Checkpoint saved: {checkpoint_file}')
+                
+                # Clean up old checkpoints (keep last 5 by default)
+                self.cleanup_old_checkpoints(checkpoint_path, keep_last_n=5)
         
         # Load best model
         if best_model_state is not None:
@@ -856,12 +925,18 @@ class TemporalLinkPredictionExperiment:
     
     def run_comprehensive_experiment(self, adjacency_sequence: List[sp.csr_matrix], 
                                      verbose: bool = True, include_static: bool = True, 
-                                     save_path: Optional[str] = None, save_data: bool = False) -> Dict:
+                                     save_path: Optional[str] = None, save_data: bool = False,
+                                     checkpoint_path: Optional[str] = None, checkpoint_freq: int = 50,
+                                     resume_from_checkpoint: Optional[str] = None) -> Dict:
         """Run comprehensive comparison experiment."""
         print(f"Running experiment with {self.encoding_type.upper()} encoding...")
         
         # Train temporal model
-        temporal_results = self.train_temporal_model(adjacency_sequence, verbose)
+        temporal_results = self.train_temporal_model(
+            adjacency_sequence, verbose, auto_save_path=None,
+            checkpoint_path=checkpoint_path, checkpoint_freq=checkpoint_freq,
+            resume_from_checkpoint=resume_from_checkpoint
+        )
         
         # Train static models (optional)
         static_results = None
@@ -1199,6 +1274,72 @@ class TemporalLinkPredictionExperiment:
         
         return model, model_config, experiment_config
     
+    @staticmethod
+    def cleanup_old_checkpoints(checkpoint_path: str, keep_last_n: int = 5):
+        """
+        Clean up old checkpoint files, keeping only the last N checkpoints.
+        
+        Args:
+            checkpoint_path: Directory containing checkpoint files
+            keep_last_n: Number of most recent checkpoints to keep (default: 5)
+        """
+        if not os.path.exists(checkpoint_path):
+            return
+            
+        # Find all checkpoint files
+        checkpoint_files = []
+        for filename in os.listdir(checkpoint_path):
+            if filename.startswith("checkpoint_epoch_") and filename.endswith(".pth"):
+                try:
+                    epoch_num = int(filename.replace("checkpoint_epoch_", "").replace(".pth", ""))
+                    checkpoint_files.append((epoch_num, filename))
+                except ValueError:
+                    continue
+        
+        # Sort by epoch number and remove old ones
+        checkpoint_files.sort(key=lambda x: x[0])
+        if len(checkpoint_files) > keep_last_n:
+            files_to_remove = checkpoint_files[:-keep_last_n]
+            for epoch_num, filename in files_to_remove:
+                file_path = os.path.join(checkpoint_path, filename)
+                try:
+                    os.remove(file_path)
+                    print(f"Removed old checkpoint: {filename}")
+                except OSError as e:
+                    print(f"Warning: Could not remove {filename}: {e}")
+    
+    @staticmethod
+    def find_latest_checkpoint(checkpoint_path: str) -> Optional[str]:
+        """
+        Find the latest checkpoint file in the given directory.
+        
+        Args:
+            checkpoint_path: Directory to search for checkpoints
+            
+        Returns:
+            Path to the latest checkpoint file, or None if no checkpoints found
+        """
+        if not os.path.exists(checkpoint_path):
+            return None
+            
+        checkpoint_files = []
+        for filename in os.listdir(checkpoint_path):
+            if filename.startswith("checkpoint_epoch_") and filename.endswith(".pth"):
+                try:
+                    epoch_num = int(filename.replace("checkpoint_epoch_", "").replace(".pth", ""))
+                    checkpoint_files.append((epoch_num, filename))
+                except ValueError:
+                    continue
+        
+        if not checkpoint_files:
+            return None
+            
+        # Return path to the checkpoint with highest epoch number
+        latest_epoch, latest_filename = max(checkpoint_files, key=lambda x: x[0])
+        latest_path = os.path.join(checkpoint_path, latest_filename)
+        print(f"Found latest checkpoint: {latest_filename} (epoch {latest_epoch})")
+        return latest_path
+    
     @classmethod
     def predict_from_saved_model(cls, save_path: str, adjacency_sequence: List[sp.csr_matrix], 
                                  device: str = 'auto', verbose: bool = True):
@@ -1438,8 +1579,19 @@ def run_full_comparison_experiment():
     return results
 
 
-def run_tnetwork_benchmark_experiment():
-    """Run GCN experiments on tnetwork benchmark data."""
+def run_tnetwork_benchmark_experiment(save_results: bool = True, save_data: bool = True, 
+                                       checkpoint_freq: int = 100):
+    """
+    Run GCN experiments on tnetwork benchmark data with saving and checkpointing.
+    
+    Args:
+        save_results: Whether to save experiment results and model weights (default: True)
+        save_data: Whether to save adjacency sequence data along with results (default: True)  
+        checkpoint_freq: Save training checkpoint every N epochs (default: 100)
+    
+    Returns:
+        Dictionary containing experiment results for each configuration
+    """
     try:
         import tnetwork as tn
         import networkx as nx
@@ -1532,6 +1684,13 @@ def run_tnetwork_benchmark_experiment():
     print(f"  learning_rate: {learning_rate}")
     print(f"  weight_decay: {weight_decay}")
     print(f"  epochs: {epochs}")
+    print(f"  save_results: {save_results}")
+    print(f"  save_data: {save_data}")
+    print(f"  checkpoint_freq: {checkpoint_freq}")
+    
+    # Generate parameter string for filenames
+    params_suffix = f"eig{n_eigenvectors}_hid{hidden_dim}_lay{num_layers}_ep{epochs}_lr{learning_rate:.0e}_wd{weight_decay:.0e}"
+    print(f"\nFiles will be saved with parameter suffix: {params_suffix}")
     
     for encoding_type in ["laplacian", "geodesic"]:
         for canonicalize in [False]:
@@ -1556,16 +1715,37 @@ def run_tnetwork_benchmark_experiment():
                 epochs=epochs
             )
             
+            # Set up saving and checkpointing paths (if enabled)
+            # Include key training parameters in filename for uniqueness
+            base_name = f"{encoding_type}_{'canon' if canonicalize else 'nocanon'}"
+            params_str = f"eig{n_eigenvectors}_hid{hidden_dim}_lay{num_layers}_ep{epochs}_lr{learning_rate:.0e}_wd{weight_decay:.0e}"
+            experiment_name = f"{base_name}_{params_str}"
+            
+            save_path = f"tnetwork_results/{experiment_name}" if save_results else None
+            checkpoint_path = f"tnetwork_checkpoints/{experiment_name}" if save_results else None
+            
+            if save_results:
+                print(f"Saving results to: {save_path}")
+                print(f"Checkpointing to: {checkpoint_path} (every {checkpoint_freq} epochs)")
+            else:
+                print("Running without saving (results will be lost after completion)")
+            
             experiment_results = experiment.run_comprehensive_experiment(
-                adjacency_sequence, verbose=True, include_static=include_static
+                adjacency_sequence, 
+                verbose=True, 
+                include_static=include_static,
+                save_path=save_path,
+                save_data=save_data if save_results else False,
+                checkpoint_path=checkpoint_path,
+                checkpoint_freq=checkpoint_freq
             )
             
             key = f"{encoding_type}_{'canon' if canonicalize else 'nocanon'}"
             results[key] = experiment_results
             
             # Plot results for this configuration
-            experiment.plot_results(experiment_results, 
-                                    save_path=f"tnetwork_gcn_{encoding_type}_{'canon' if canonicalize else 'nocanon'}.png")
+            plot_filename = f"tnetwork_gcn_{experiment_name}.png"
+            experiment.plot_results(experiment_results, save_path=plot_filename)
     
     # Summary comparison
     print(f"\n{'='*70}")
@@ -1608,6 +1788,245 @@ def run_tnetwork_benchmark_experiment():
     print(f"  Community size: 15 nodes each")
     
     return results
+
+
+def plot_tnetwork_comparison_bars(results: Dict, save_path: Optional[str] = None):
+    """
+    Create bar graphs comparing geodesic, laplacian (temporal), and laplacian (static) performance.
+    
+    Args:
+        results: Dictionary containing experiment results from run_tnetwork_benchmark_experiment
+        save_path: Optional path to save the plot (without extension)
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Set Times New Roman font
+    plt.rcParams['font.family'] = 'Times New Roman'
+    
+    # Extract performance metrics
+    metrics_data = {}
+    
+    # Process each experiment type
+    for key, experiment_results in results.items():
+        encoding_type = key.split('_')[0]  # 'laplacian' or 'geodesic'
+        
+        # Get temporal results
+        temporal_results = experiment_results['temporal']['results']
+        if temporal_results:
+            temporal_df = pd.DataFrame(temporal_results)
+            temporal_mean = temporal_df[['auc', 'ap', 'accuracy']].mean()
+            
+            if encoding_type == 'geodesic':
+                metrics_data['Geodesic (Temporal)'] = {
+                    'AUC': temporal_mean['auc'],
+                    'AP': temporal_mean['ap'], 
+                    'Accuracy': temporal_mean['accuracy']
+                }
+            else:  # laplacian
+                metrics_data['Laplacian (Temporal)'] = {
+                    'AUC': temporal_mean['auc'],
+                    'AP': temporal_mean['ap'],
+                    'Accuracy': temporal_mean['accuracy']
+                }
+        
+        # Get static results (only for laplacian)
+        static_results = experiment_results['static']
+        if static_results is not None and static_results['results']:
+            static_df = pd.DataFrame(static_results['results'])
+            static_mean = static_df[['auc', 'ap', 'accuracy']].mean()
+            
+            metrics_data['Laplacian (Static)'] = {
+                'AUC': static_mean['auc'],
+                'AP': static_mean['ap'],
+                'Accuracy': static_mean['accuracy']
+            }
+    
+    if not metrics_data:
+        print("Warning: No results found to plot")
+        return
+    
+    # Create single comparison plot
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    
+    # Method names in desired order and colors
+    desired_order = ['Geodesic (Temporal)', 'Laplacian (Temporal)', 'Laplacian (Static)']
+    methods = [method for method in desired_order if method in metrics_data]
+    colors = ['#2E86AB', '#A23B72', '#F18F01']  # Blue, Purple, Orange
+    
+    # Plot AUC and Accuracy
+    auc_values = [metrics_data[method]['AUC'] for method in methods]
+    accuracy_values = [metrics_data[method]['Accuracy'] for method in methods]
+    
+    x = np.arange(len(methods))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, auc_values, width, label='AUC', color=colors, alpha=0.8)
+    bars2 = ax.bar(x + width/2, accuracy_values, width, label='Accuracy', 
+                   color=colors, alpha=0.6, hatch='//')
+    
+    #ax.set_xlabel('Method')
+    ax.set_ylabel('Score')
+    #ax.set_title('Link Prediction Performance: AUC vs Accuracy')
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=45, ha='right')
+    ax.legend()
+    ax.set_ylim(0.45, 0.70)
+    ax.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Print summary table
+    print("\n" + "="*70)
+    print("TNETWORK BENCHMARK COMPARISON SUMMARY")
+    print("="*70)
+    print(f"{'Method':<20} {'AUC':<10} {'AP':<10} {'Accuracy':<10}")
+    print("-" * 50)
+    for method in methods:
+        auc = metrics_data[method]['AUC']
+        ap = metrics_data[method]['AP'] 
+        acc = metrics_data[method]['Accuracy']
+        print(f"{method:<20} {auc:<10.4f} {ap:<10.4f} {acc:<10.4f}")
+    
+    # Calculate improvements
+    if 'Laplacian (Static)' in metrics_data and 'Laplacian (Temporal)' in metrics_data:
+        temporal_auc = metrics_data['Laplacian (Temporal)']['AUC']
+        static_auc = metrics_data['Laplacian (Static)']['AUC']
+        improvement = temporal_auc - static_auc
+        print(f"\nLaplacian Temporal vs Static AUC improvement: {improvement:+.4f}")
+    
+    if 'Geodesic (Temporal)' in metrics_data and 'Laplacian (Temporal)' in metrics_data:
+        geo_auc = metrics_data['Geodesic (Temporal)']['AUC']  
+        lap_auc = metrics_data['Laplacian (Temporal)']['AUC']
+        improvement = geo_auc - lap_auc
+        print(f"Geodesic vs Laplacian Temporal AUC improvement: {improvement:+.4f}")
+    
+    if save_path:
+        plt.savefig(f"{save_path}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"{save_path}.pdf", bbox_inches='tight', transparent=True)
+        print(f"\nPlots saved to: {save_path}.png and {save_path}.pdf")
+    
+    plt.show()
+    
+    return fig, ax
+
+
+def load_tnetwork_results_from_folder(folder_path: str = "tnetwork_results/") -> Dict:
+    """
+    Load saved tnetwork experiment results from folder for plotting.
+    
+    Args:
+        folder_path: Path to folder containing saved .pkl result files
+        
+    Returns:
+        Dictionary in same format as run_tnetwork_benchmark_experiment() for plotting
+    """
+    import glob
+    
+    if not os.path.exists(folder_path):
+        raise FileNotFoundError(f"Results folder not found: {folder_path}")
+    
+    results = {}
+    
+    # Find all .pkl files in the folder
+    pkl_files = glob.glob(os.path.join(folder_path, "*.pkl"))
+    
+    if not pkl_files:
+        raise FileNotFoundError(f"No .pkl result files found in {folder_path}")
+    
+    print(f"Loading tnetwork results from: {folder_path}")
+    print(f"Found {len(pkl_files)} result files:")
+    
+    for pkl_file in pkl_files:
+        filename = os.path.basename(pkl_file)
+        print(f"  - {filename}")
+        
+        try:
+            # Load the saved experiment data
+            # Handle PyTorch model loading by setting the proper module context
+            import sys
+            current_module = sys.modules[__name__]
+            
+            with open(pkl_file, 'rb') as f:
+                # Temporarily modify the module for pickle loading
+                original_main = None
+                if '__main__' in sys.modules:
+                    original_main = sys.modules['__main__']
+                sys.modules['__main__'] = current_module
+                
+                try:
+                    saved_data = pickle.load(f)
+                finally:
+                    # Restore original __main__ 
+                    if original_main:
+                        sys.modules['__main__'] = original_main
+            
+            # Extract experiment results
+            experiment_results = saved_data['experiment_results']
+            
+            # Parse encoding type from filename
+            if filename.startswith('geodesic_'):
+                key = 'geodesic_nocanon'
+            elif filename.startswith('laplacian_'):
+                key = 'laplacian_nocanon'
+            else:
+                # Try to parse from experiment config
+                encoding_type = experiment_results['experiment_config']['encoding_type']
+                canonicalize = experiment_results['experiment_config']['canonicalize_sign']
+                key = f"{encoding_type}_{'canon' if canonicalize else 'nocanon'}"
+            
+            # Store the results
+            results[key] = experiment_results
+            
+            # Print summary info
+            config = experiment_results['experiment_config']
+            temporal_results = experiment_results['temporal']['results']
+            static_results = experiment_results['static']
+            
+            if temporal_results:
+                temporal_df = pd.DataFrame(temporal_results)
+                mean_auc = temporal_df['auc'].mean()
+                print(f"    Temporal AUC: {mean_auc:.4f}")
+            
+            if static_results and static_results['results']:
+                static_df = pd.DataFrame(static_results['results'])
+                static_mean_auc = static_df['auc'].mean()
+                print(f"    Static AUC: {static_mean_auc:.4f}")
+            else:
+                print(f"    No static results (include_static: {config.get('include_static', False)})")
+                
+        except Exception as e:
+            print(f"    Error loading {filename}: {e}")
+            continue
+    
+    if not results:
+        raise ValueError("No valid results could be loaded from the folder")
+    
+    print(f"\nSuccessfully loaded {len(results)} experiment results:")
+    for key in results.keys():
+        print(f"  - {key}")
+    
+    return results
+
+
+def plot_saved_tnetwork_results(folder_path: str = "tnetwork_results/", 
+                                 save_path: Optional[str] = None):
+    """
+    Load saved tnetwork results from folder and create comparison bar plots.
+    
+    Args:
+        folder_path: Path to folder containing saved .pkl result files
+        save_path: Optional path to save the plot (without extension)
+    """
+    print("="*60)
+    print("LOADING AND PLOTTING SAVED TNETWORK RESULTS")
+    print("="*60)
+    
+    # Load the results
+    results = load_tnetwork_results_from_folder(folder_path)
+    
+    # Create the comparison plots
+    return plot_tnetwork_comparison_bars(results, save_path)
 
 
 def example_save_load_usage():
@@ -1687,12 +2106,95 @@ def example_save_load_usage():
     return results, prediction_results
 
 
+def example_checkpoint_usage():
+    """
+    Example of how to use the new checkpointing functionality.
+    """
+    print("=" * 60)
+    print("EXAMPLE: TRAINING WITH CHECKPOINTS")
+    print("=" * 60)
+    
+    # Create some dummy data for demonstration
+    import scipy.sparse as sp
+    import numpy as np
+    
+    # Generate a small temporal network sequence
+    n_nodes = 50
+    n_timesteps = 10
+    adjacency_sequence = []
+    np.random.seed(42)
+    
+    for t in range(n_timesteps):
+        adj = sp.random(n_nodes, n_nodes, density=0.1, format='csr')
+        adj = adj + adj.T  
+        adj.data = np.ones_like(adj.data)
+        adjacency_sequence.append(adj)
+    
+    # Example 1: Training with checkpoints
+    print("\n1. Training with checkpointing enabled...")
+    
+    experiment = TemporalLinkPredictionExperiment(
+        encoding_type="laplacian",
+        n_eigenvectors=16,
+        hidden_dim=32,
+        epochs=200,  # Longer training for checkpointing demo
+        learning_rate=1e-3
+    )
+    
+    checkpoint_dir = "checkpoints/example_run"
+    results = experiment.train_temporal_model(
+        adjacency_sequence,
+        verbose=True,
+        checkpoint_path=checkpoint_dir,
+        checkpoint_freq=25,  # Save every 25 epochs
+        auto_save_path="example_final_model"
+    )
+    
+    print(f"\nTraining completed. Checkpoints saved to: {checkpoint_dir}")
+    
+    # Example 2: Resume from latest checkpoint
+    print("\n2. Finding and resuming from latest checkpoint...")
+    
+    latest_checkpoint = TemporalLinkPredictionExperiment.find_latest_checkpoint(checkpoint_dir)
+    if latest_checkpoint:
+        print(f"Found checkpoint: {latest_checkpoint}")
+        
+        # Create new experiment instance for resumed training
+        resume_experiment = TemporalLinkPredictionExperiment(
+            encoding_type="laplacian",
+            n_eigenvectors=16,
+            hidden_dim=32,
+            epochs=250,  # Train for more epochs
+            learning_rate=1e-3
+        )
+        
+        # Resume training from checkpoint
+        resumed_results = resume_experiment.train_temporal_model(
+            adjacency_sequence,
+            verbose=True,
+            checkpoint_path=checkpoint_dir,
+            checkpoint_freq=25,
+            resume_from_checkpoint=latest_checkpoint,
+            auto_save_path="example_resumed_model"
+        )
+        
+        print("\nResumed training completed!")
+        return resumed_results
+    else:
+        print("No checkpoints found.")
+        return results
+
+
 if __name__ == "__main__":
     # Run the comprehensive experiment
     # results = run_full_comparison_experiment()
     
     # Run tnetwork benchmark experiment
-    # tnetwork_results = run_tnetwork_benchmark_experiment()
+    #tnetwork_results = run_tnetwork_benchmark_experiment()
+    # load results
+
+    plot_saved_tnetwork_results(folder_path="tnetwork_results/", save_path="tnetwork_comparison_plot")
     
     # Run the example showing save/load functionality
-    example_results = example_save_load_usage()
+    #example_results = example_save_load_usage()
+    

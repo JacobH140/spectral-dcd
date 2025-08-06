@@ -1,0 +1,30 @@
+{
+  "final_metrics": {
+    "mean_auc": 0.6627656657095022,
+    "mean_ap": 0.6734429630440761,
+    "mean_accuracy": 0.5969206712731681,
+    "std_auc": 0.010141994872075191,
+    "std_ap": 0.010997834348917938,
+    "std_accuracy": 0.012120252461690446,
+    "best_val_auc": 0.6692768857132716
+  },
+  "experiment_config": {
+    "encoding_type": "laplacian",
+    "n_eigenvectors": 32,
+    "canonicalize_sign": false,
+    "hidden_dim": 32,
+    "num_layers": 2,
+    "dropout": 0.5,
+    "input_dropout": 0.1,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.0001,
+    "epochs": 2000,
+    "device": "cpu",
+    "include_static": true
+  },
+  "training_info": {
+    "train_snapshots": 147,
+    "val_snapshots": 32,
+    "test_snapshots": 32
+  }
+}
