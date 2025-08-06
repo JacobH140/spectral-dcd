@@ -216,7 +216,7 @@ def estpoint_tangent(H, Y, Theta, X, t, tH=0):
 #    return communities
     
 
-def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
+def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2, return_intermediate_iterations=False, num_intermediate_iterations=20):
     X, t = data  # X is list of matrices, t is list of times
     init_start = time.time()
     # Extract M1 and MT
@@ -306,6 +306,12 @@ def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
     H_old = H.copy()
     Y_old = Y.copy()
     Theta_old = Theta.copy()
+    
+    # Storage for intermediate iterations if requested
+    if return_intermediate_iterations:
+        intermediate_H = []
+        intermediate_Y = []
+        intermediate_Theta = []
 
     # fix tH=0, at least until there seems to be a reason to not do so
     tH = 0 
@@ -340,6 +346,18 @@ def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
         Theta = esttheta(H, Y, X, t, niter=5, tH=tH, Theta_init=Theta)
         theta_times.append(time.time() - theta_time)
 
+        # Store intermediate iterations if requested (only last num_intermediate_iterations)
+        if return_intermediate_iterations:
+            intermediate_H.append(H.copy())
+            intermediate_Y.append(Y.copy())
+            intermediate_Theta.append(Theta.copy())
+            
+            # Keep only the last num_intermediate_iterations
+            if len(intermediate_H) > num_intermediate_iterations:
+                intermediate_H.pop(0)
+                intermediate_Y.pop(0)
+                intermediate_Theta.pop(0)
+
         # Check convergence?
         conv_check_time = time.time()
         delta_H = np.linalg.norm(H - H_old)
@@ -365,12 +383,15 @@ def sfit_point_tangent_geodesic(data, k, max_iter, tol=1e-5, rel_tol=1e-2):
     #print("point tangent time", np.sum(np.array(point_tangent_times)))
     #print("theta time", np.sum(np.array(theta_times)))
     #print("conv check time", np.sum(np.array(conv_check_times)))
+    
+    if return_intermediate_iterations:
+        return H, Y, Theta, intermediate_H, intermediate_Y, intermediate_Theta
     return H, Y, Theta
 
 
 
 class SpectralGeodesicSmoother(ABC):
-    def __init__(self, *args, d, T, sadj_list, ke='auto', kc_list='auto', stable_communities=False, fit_eigenvector_embeddings=False, which_eig='smallest', t=None, benefit_fn=None, smoothing_filter=None, smoothing_parameter=None, max_iter=1000):
+    def __init__(self, *args, d, T, sadj_list, ke='auto', kc_list='auto', stable_communities=False, fit_eigenvector_embeddings=False, which_eig='smallest', t=None, benefit_fn=None, smoothing_filter=None, smoothing_parameter=None, max_iter=1000, use_intermediate_iterations=False, num_intermediate_iterations=20):
         if len(args) > 0:
             raise ValueError("This class does not accept positional arguments")
 
@@ -393,6 +414,8 @@ class SpectralGeodesicSmoother(ABC):
         self.smoothing_filter = smoothing_filter
         self.smoothing_parameter = smoothing_parameter
         self.T = T
+        self.use_intermediate_iterations = use_intermediate_iterations
+        self.num_intermediate_iterations = num_intermediate_iterations
         
         if self.stable_communities and kc_list == 'auto':
             self.kc_list = [ke]*T
@@ -441,23 +464,58 @@ class SpectralGeodesicSmoother(ABC):
         else:
             self.Xs = modeled_clustering_matrices
             
-        H, Y, Theta = sfit_point_tangent_geodesic((self.Xs, self.t), k=self.ke, max_iter=self.max_iter)
+        # Get geodesic parameters, optionally with intermediate iterations
+        if self.use_intermediate_iterations:
+            H, Y, Theta, intermediate_H, intermediate_Y, intermediate_Theta = sfit_point_tangent_geodesic(
+                (self.Xs, self.t), k=self.ke, max_iter=self.max_iter, 
+                return_intermediate_iterations=True, 
+                num_intermediate_iterations=self.num_intermediate_iterations
+            )
+            self.intermediate_H = intermediate_H
+            self.intermediate_Y = intermediate_Y 
+            self.intermediate_Theta = intermediate_Theta
+        else:
+            H, Y, Theta = sfit_point_tangent_geodesic((self.Xs, self.t), k=self.ke, max_iter=self.max_iter)
+            
+        # Compute main geodesic embeddings
         self.Us = [H @ cosm(np.diag(Theta)*self.t[i]) + Y @ sinm(np.diag(Theta)*self.t[i]) for i in range(self.T)]
+        
+        # Optionally compute intermediate geodesic embeddings for positional encodings
+        if self.use_intermediate_iterations:
+            self.intermediate_Us = []
+            for H_inter, Y_inter, Theta_inter in zip(intermediate_H, intermediate_Y, intermediate_Theta):
+                Us_inter = [H_inter @ cosm(np.diag(Theta_inter)*self.t[i]) + Y_inter @ sinm(np.diag(Theta_inter)*self.t[i]) for i in range(self.T)]
+                self.intermediate_Us.append(Us_inter)
+            
+            # Concatenate intermediate embeddings to main embeddings for enriched positional encodings
+            self.enriched_Us = []
+            for i in range(self.T):
+                # Start with main embedding
+                enriched_embedding = [self.Us[i]]
+                # Add intermediate embeddings for this timestep
+                for inter_Us in self.intermediate_Us:
+                    enriched_embedding.append(inter_Us[i])
+                # Concatenate along feature dimension
+                self.enriched_Us.append(np.concatenate(enriched_embedding, axis=1))
+        else:
+            self.enriched_Us = self.Us
     
     # this overwritten sometimes by subclasses
     def clustering_Euclidean(self):
-        T = len(self.Us)
+        # Use enriched embeddings if available, otherwise use standard embeddings
+        embeddings_to_use = self.enriched_Us if hasattr(self, 'enriched_Us') else self.Us
+        T = len(embeddings_to_use)
         #print("kc_list:", self.kc_list)
 
         if all(k == self.kc_list[0] for k in self.kc_list):  # Constant kc_list
             print("Using constant kc_list")
             k_val = self.kc_list[0]
             kmeans = KMeans(n_clusters=k_val, n_init=10)
-            labels = [kmeans.fit_predict(U_i) for U_i in self.Us]
+            labels = [kmeans.fit_predict(U_i) for U_i in embeddings_to_use]
             return labels
         elif all(isinstance(k, int) for k in self.kc_list):  # Non-constant, provided kc_list
             labels = []
-            for U_i, k_val in zip(self.Us, self.kc_list):
+            for U_i, k_val in zip(embeddings_to_use, self.kc_list):
                 kmeans = KMeans(n_clusters=k_val, n_init=10) 
                 labels.append(kmeans.fit_predict(U_i))
             return labels
@@ -469,7 +527,7 @@ class SpectralGeodesicSmoother(ABC):
             labels_by_k = {k: [] for k in k_vals}
 
             start = time.time()
-            for i, U_i in enumerate(self.Us):
+            for i, U_i in enumerate(embeddings_to_use):
                 for j, k_val in enumerate(k_vals):
                     kmeans = KMeans(n_clusters=k_val, n_init=10)
                     labels_i = kmeans.fit_predict(U_i)
@@ -510,7 +568,7 @@ class SpectralGeodesicSmoother(ABC):
         print(f"Time to get geodesic embeddings: {time.time() - time_start}")
         
 
-def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_communities=False, mode='simple-nsc', fit_eigenvector_embeddings=False, smoothing_filter=None, smoothing_parameter=None, return_geo_embeddings_only=False,  **mode_kwargs):
+def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_communities=False, mode='simple-nsc', fit_eigenvector_embeddings=False, smoothing_filter=None, smoothing_parameter=None, return_geo_embeddings_only=False, use_intermediate_iterations=False, num_intermediate_iterations=20, **mode_kwargs):
     #print("spectral_geodesic_smoothing")
     T = len(sadj_list)
     if not isinstance(kc, list) and kc != 'auto':
@@ -553,13 +611,18 @@ def spectral_geodesic_smoothing(sadj_list, T, num_nodes, ke, kc='auto', stable_c
                               fit_eigenvector_embeddings=fit_eigenvector_embeddings, 
                               smoothing_filter=smoothing_filter,
                               smoothing_parameter=smoothing_parameter,
+                              use_intermediate_iterations=use_intermediate_iterations,
+                              num_intermediate_iterations=num_intermediate_iterations,
                               **mode_kwargs)  
 
     if return_geo_embeddings_only:
         smoother.run_geo_embeddings()
-        return smoother.Us
+        # Return enriched embeddings if available, otherwise standard embeddings
+        return smoother.enriched_Us if hasattr(smoother, 'enriched_Us') else smoother.Us
     assignments = smoother.run_dcd()
-    return assignments, smoother.Us
+    # Return enriched embeddings if available, otherwise standard embeddings  
+    embeddings_to_return = smoother.enriched_Us if hasattr(smoother, 'enriched_Us') else smoother.Us
+    return assignments, embeddings_to_return
 
 
 ## Begin subclass implementations

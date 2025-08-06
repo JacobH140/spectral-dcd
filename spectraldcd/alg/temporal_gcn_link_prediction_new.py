@@ -209,6 +209,98 @@ class GeodesicTemporalEncoder:
         return self.embeddings_sequence[t]
 
 
+class GeodesicIntermediateEncoder:
+    """Encodes node features using geodesic smoothing with intermediate iterations."""
+    
+    def __init__(self, n_eigenvectors: int = 64, canonicalize_sign: bool = False, num_intermediate_iterations: int = 20):
+        self.n_eigenvectors = n_eigenvectors
+        self.canonicalize_sign = canonicalize_sign
+        self.num_intermediate_iterations = num_intermediate_iterations
+        self.embeddings_sequence = None
+        if self.canonicalize_sign:
+            self.canonicalizer = MAPCanonicalizer()
+        
+    def fit_transform_sequence(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
+        """Compute geodesically smoothed embeddings with intermediate iterations for temporal sequence."""
+        try:
+            # Import the spectral geodesic smoothing function
+            from .spectral_geodesic_smoothing import spectral_geodesic_smoothing
+        except ImportError:
+            try:
+                from spectral_geodesic_smoothing import spectral_geodesic_smoothing
+            except ImportError:
+                print("Warning: Could not import spectral_geodesic_smoothing, falling back to individual Laplacian encodings")
+                return self._fallback_encoding(adjacency_sequence)
+        
+        try:
+            T = len(adjacency_sequence)
+            num_nodes = adjacency_sequence[0].shape[0]
+            
+            print(f"Debug: Starting geodesic smoothing with intermediate iterations with T={T}, num_nodes={num_nodes}, ke={self.n_eigenvectors}, intermediate_iterations={self.num_intermediate_iterations}")
+            
+            # Run spectral geodesic smoothing with intermediate iterations to get enriched embeddings
+            embeddings_sequence = spectral_geodesic_smoothing(
+                adjacency_sequence, 
+                T=T, 
+                num_nodes=num_nodes, 
+                ke=self.n_eigenvectors,
+                stable_communities=False,
+                mode='simple-nsc',
+                return_geo_embeddings_only=True,
+                use_intermediate_iterations=True,
+                num_intermediate_iterations=self.num_intermediate_iterations
+            )
+            
+            print(f"Debug: Geodesic smoothing with intermediate iterations succeeded, got {len(embeddings_sequence)} embeddings")
+            print(f"Debug: Enriched embedding dimensions: {embeddings_sequence[0].shape[1]} (original: {self.n_eigenvectors}, enriched: {embeddings_sequence[0].shape[1]})")
+            
+            # Process embeddings to apply canonicalization if needed
+            processed_embeddings = []
+            for t in range(T):
+                embedding = embeddings_sequence[t]
+                
+                # Canonicalize signs if enabled (note: this operates on the enriched embeddings)
+                if self.canonicalize_sign:
+                    # Apply canonicalization to blocks of the enriched embedding
+                    original_dims = self.n_eigenvectors
+                    total_dims = embedding.shape[1]
+                    num_blocks = total_dims // original_dims
+                    
+                    canonicalized_blocks = []
+                    for block_idx in range(num_blocks):
+                        start_idx = block_idx * original_dims
+                        end_idx = (block_idx + 1) * original_dims
+                        block = embedding[:, start_idx:end_idx]
+                        canonicalized_block = self.canonicalizer.canonicalize_signs(block)
+                        canonicalized_blocks.append(canonicalized_block)
+                    
+                    embedding = np.hstack(canonicalized_blocks)
+                
+                processed_embeddings.append(embedding)
+            
+            self.embeddings_sequence = processed_embeddings
+            return processed_embeddings
+            
+        except Exception as e:
+            print(f"Warning: Geodesic smoothing with intermediate iterations failed ({e}), falling back to individual Laplacian encodings")
+            return self._fallback_encoding(adjacency_sequence)
+    
+    def _fallback_encoding(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
+        """Fallback to individual Laplacian encodings if geodesic smoothing fails."""
+        encoder = LaplacianEigenvectorEncoder(self.n_eigenvectors, canonicalize_sign=self.canonicalize_sign)
+        embeddings = []
+        for adj_matrix in adjacency_sequence:
+            embedding = encoder.fit_transform(adj_matrix)
+            embeddings.append(embedding)
+        return embeddings
+        
+    def get_embedding_at_time(self, t: int) -> np.ndarray:
+        """Get embedding for specific timestep."""
+        if self.embeddings_sequence is None:
+            raise ValueError("Must call fit_transform_sequence first")
+        return self.embeddings_sequence[t]
+
+
 class TemporalGCNCell(nn.Module):
     """Single temporal GCN cell with GRU-like update mechanism."""
     
@@ -372,7 +464,7 @@ class TemporalLinkPredictionExperiment:
     """Main experiment class for comparing temporal vs static approaches."""
     
     def __init__(self, 
-                 encoding_type: str = "laplacian",  # "laplacian", "identity", "none", or "geodesic"
+                 encoding_type: str = "laplacian",  # "laplacian", "identity", "none", "geodesic", or "geodesic_intermediate"
                  n_eigenvectors: int = 32,
                  canonicalize_sign: bool = False,
                  hidden_dim: int = 64,
@@ -387,7 +479,7 @@ class TemporalLinkPredictionExperiment:
         Initialize experiment.
         
         Args:
-            encoding_type: Type of node encoding ("laplacian", "identity", "none", or "geodesic")
+            encoding_type: Type of node encoding ("laplacian", "identity", "none", "geodesic", or "geodesic_intermediate")
             n_eigenvectors: Number of eigenvectors for encoding
             canonicalize_sign: Whether to apply sign canonicalization
             hidden_dim: Hidden dimension for temporal GCN
@@ -417,10 +509,14 @@ class TemporalLinkPredictionExperiment:
         
         self.encoder = None
         self.geodesic_encoder = None
+        self.geodesic_intermediate_encoder = None
         if encoding_type == "laplacian":
             self.encoder = LaplacianEigenvectorEncoder(n_eigenvectors, canonicalize_sign=canonicalize_sign)
         elif encoding_type == "geodesic":
             self.geodesic_encoder = GeodesicTemporalEncoder(n_eigenvectors, canonicalize_sign=canonicalize_sign)
+        elif encoding_type == "geodesic_intermediate":
+            # Use 20 intermediate iterations by default - can be made configurable later
+            self.geodesic_intermediate_encoder = GeodesicIntermediateEncoder(n_eigenvectors, canonicalize_sign=canonicalize_sign, num_intermediate_iterations=20)
     
     def _prepare_features(self, adjacency_matrix: sp.csr_matrix) -> np.ndarray:
         """Prepare node features based on encoding method (for single timestep)."""
@@ -434,6 +530,10 @@ class TemporalLinkPredictionExperiment:
             # For geodesic encoding, we need the full sequence - this should not be called directly
             # Instead, use _prepare_geodesic_features_sequence
             raise ValueError("For geodesic encoding, use _prepare_geodesic_features_sequence instead")
+        elif self.encoding_type == "geodesic_intermediate":
+            # For geodesic intermediate encoding, we need the full sequence - this should not be called directly
+            # Instead, use _prepare_geodesic_features_sequence
+            raise ValueError("For geodesic_intermediate encoding, use _prepare_geodesic_features_sequence instead")
         else:  # encoding_type == "none"
             # Use minimal constant features (just a single dimension)
             n_nodes = adjacency_matrix.shape[0]
@@ -441,10 +541,12 @@ class TemporalLinkPredictionExperiment:
     
     def _prepare_geodesic_features_sequence(self, adjacency_sequence: List[sp.csr_matrix]) -> List[np.ndarray]:
         """Prepare geodesic features for entire temporal sequence."""
-        if self.encoding_type != "geodesic":
-            raise ValueError("This method should only be called for geodesic encoding")
-        
-        return self.geodesic_encoder.fit_transform_sequence(adjacency_sequence)
+        if self.encoding_type == "geodesic":
+            return self.geodesic_encoder.fit_transform_sequence(adjacency_sequence)
+        elif self.encoding_type == "geodesic_intermediate":
+            return self.geodesic_intermediate_encoder.fit_transform_sequence(adjacency_sequence)
+        else:
+            raise ValueError("This method should only be called for geodesic or geodesic_intermediate encoding")
     
     def _split_temporal_snapshots(self, adjacency_sequence: List[sp.csr_matrix]) -> Tuple[List[sp.csr_matrix], List[sp.csr_matrix], List[sp.csr_matrix]]:
         """Split temporal snapshots into train/val/test sets (70%/15%/15%)."""
@@ -472,7 +574,7 @@ class TemporalLinkPredictionExperiment:
         data_sequence = []
         
         # Handle geodesic encoding differently since it needs the full sequence
-        if self.encoding_type == "geodesic":
+        if self.encoding_type in ["geodesic", "geodesic_intermediate"]:
             features_sequence = self._prepare_geodesic_features_sequence(adjacency_sequence)
             
             for i, adj_matrix in enumerate(adjacency_sequence):
@@ -1522,10 +1624,10 @@ def run_full_comparison_experiment():
     
     print(f"Generated {len(adjacency_sequence)} timesteps with {adjacency_sequence[0].shape[0]} nodes")
     
-    # Run experiments with laplacian and geodesic encoding methods
+    # Run experiments with laplacian, geodesic, and geodesic_intermediate encoding methods
     results = {}
     
-    for encoding_type in ["laplacian", "geodesic"]:
+    for encoding_type in ["laplacian", "geodesic", "geodesic_intermediate"]:
         for canonicalize in [False, True]:
             print(f"\n{'='*50}")
             print(f"Running experiment with {encoding_type.upper()} encoding and canonicalization={canonicalize}")
@@ -1673,7 +1775,7 @@ def run_tnetwork_benchmark_experiment(save_results: bool = True, save_data: bool
     input_dropout = 0.1
     learning_rate = 5e-4
     weight_decay = 1e-4
-    epochs = 2000
+    epochs = 750
     
     print(f"Experiment parameters:")
     print(f"  n_eigenvectors: {n_eigenvectors}")
@@ -1692,7 +1794,7 @@ def run_tnetwork_benchmark_experiment(save_results: bool = True, save_data: bool
     params_suffix = f"eig{n_eigenvectors}_hid{hidden_dim}_lay{num_layers}_ep{epochs}_lr{learning_rate:.0e}_wd{weight_decay:.0e}"
     print(f"\nFiles will be saved with parameter suffix: {params_suffix}")
     
-    for encoding_type in ["laplacian", "geodesic"]:
+    for encoding_type in ["laplacian", "geodesic", "geodesic_intermediate"]:
         for canonicalize in [False]:
             # Include static baselines only for laplacian encoding
             include_static = (encoding_type == "laplacian")
@@ -1792,7 +1894,7 @@ def run_tnetwork_benchmark_experiment(save_results: bool = True, save_data: bool
 
 def plot_tnetwork_comparison_bars(results: Dict, save_path: Optional[str] = None):
     """
-    Create bar graphs comparing geodesic, laplacian (temporal), and laplacian (static) performance.
+    Create bar graphs comparing geodesic, geodesic_intermediate, laplacian (temporal), and laplacian (static) performance.
     
     Args:
         results: Dictionary containing experiment results from run_tnetwork_benchmark_experiment
@@ -1809,7 +1911,13 @@ def plot_tnetwork_comparison_bars(results: Dict, save_path: Optional[str] = None
     
     # Process each experiment type
     for key, experiment_results in results.items():
-        encoding_type = key.split('_')[0]  # 'laplacian' or 'geodesic'
+        encoding_parts = key.split('_')  # e.g., 'geodesic_intermediate_nocanon' -> ['geodesic', 'intermediate', 'nocanon']
+        
+        # Determine encoding type
+        if len(encoding_parts) >= 2 and encoding_parts[0] == 'geodesic' and encoding_parts[1] == 'intermediate':
+            encoding_type = 'geodesic_intermediate'
+        else:
+            encoding_type = encoding_parts[0]  # 'laplacian' or 'geodesic'
         
         # Get temporal results
         temporal_results = experiment_results['temporal']['results']
@@ -1819,6 +1927,12 @@ def plot_tnetwork_comparison_bars(results: Dict, save_path: Optional[str] = None
             
             if encoding_type == 'geodesic':
                 metrics_data['Geodesic (Temporal)'] = {
+                    'AUC': temporal_mean['auc'],
+                    'AP': temporal_mean['ap'], 
+                    'Accuracy': temporal_mean['accuracy']
+                }
+            elif encoding_type == 'geodesic_intermediate':
+                metrics_data['Geodesic Intermediate (Temporal)'] = {
                     'AUC': temporal_mean['auc'],
                     'AP': temporal_mean['ap'], 
                     'Accuracy': temporal_mean['accuracy']
@@ -1850,9 +1964,9 @@ def plot_tnetwork_comparison_bars(results: Dict, save_path: Optional[str] = None
     fig, ax = plt.subplots(1, 1, figsize=(10, 6))
     
     # Method names in desired order and colors
-    desired_order = ['Geodesic (Temporal)', 'Laplacian (Temporal)', 'Laplacian (Static)']
+    desired_order = ['Geodesic Intermediate (Temporal)', 'Geodesic (Temporal)', 'Laplacian (Temporal)', 'Laplacian (Static)']
     methods = [method for method in desired_order if method in metrics_data]
-    colors = ['#2E86AB', '#A23B72', '#F18F01']  # Blue, Purple, Orange
+    colors = ['#1B9E77', '#2E86AB', '#A23B72', '#F18F01']  # Teal, Blue, Purple, Orange
     
     # Plot AUC and Accuracy
     auc_values = [metrics_data[method]['AUC'] for method in methods]
@@ -1900,6 +2014,18 @@ def plot_tnetwork_comparison_bars(results: Dict, save_path: Optional[str] = None
         lap_auc = metrics_data['Laplacian (Temporal)']['AUC']
         improvement = geo_auc - lap_auc
         print(f"Geodesic vs Laplacian Temporal AUC improvement: {improvement:+.4f}")
+    
+    if 'Geodesic Intermediate (Temporal)' in metrics_data and 'Geodesic (Temporal)' in metrics_data:
+        geo_inter_auc = metrics_data['Geodesic Intermediate (Temporal)']['AUC']
+        geo_auc = metrics_data['Geodesic (Temporal)']['AUC']
+        improvement = geo_inter_auc - geo_auc
+        print(f"Geodesic Intermediate vs Geodesic Temporal AUC improvement: {improvement:+.4f}")
+    
+    if 'Geodesic Intermediate (Temporal)' in metrics_data and 'Laplacian (Temporal)' in metrics_data:
+        geo_inter_auc = metrics_data['Geodesic Intermediate (Temporal)']['AUC']
+        lap_auc = metrics_data['Laplacian (Temporal)']['AUC']
+        improvement = geo_inter_auc - lap_auc
+        print(f"Geodesic Intermediate vs Laplacian Temporal AUC improvement: {improvement:+.4f}")
     
     if save_path:
         plt.savefig(f"{save_path}.png", dpi=300, bbox_inches='tight')
@@ -2190,7 +2316,7 @@ if __name__ == "__main__":
     # results = run_full_comparison_experiment()
     
     # Run tnetwork benchmark experiment
-    #tnetwork_results = run_tnetwork_benchmark_experiment()
+    tnetwork_results = run_tnetwork_benchmark_experiment()
     # load results
 
     plot_saved_tnetwork_results(folder_path="tnetwork_results/", save_path="tnetwork_comparison_plot")
